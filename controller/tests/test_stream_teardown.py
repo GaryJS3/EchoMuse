@@ -36,7 +36,7 @@ FUNC = "_ffmpeg_decode"
 
 def _finally_body() -> list[ast.stmt]:
     """The `finally:` block of _ffmpeg_decode."""
-    tree = ast.parse((CONTROLLER / "em_esphome.py").read_text())
+    tree = ast.parse((CONTROLLER / "em_audio_stream.py").read_text())
     for node in ast.walk(tree):
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == FUNC:
             for stmt in ast.walk(node):

@@ -31,7 +31,7 @@ PUBLIC = {
 
 # WebSocket upgrades cannot carry the Authorization header from a browser, so
 # they authenticate inside the handler (see _ws_shell's docstring).
-WS_SELF_AUTH = {"_ws_shell", "_ws_events"}
+WS_SELF_AUTH = {"_ws_shell", "_ws_events", "_ws_voice"}
 
 DECORATORS = {"require_auth", "require_admin"}
 

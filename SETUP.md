@@ -91,6 +91,11 @@ The class of algorithm that *does* extract directivity from a sub-wavelength ape
 
 ## Mic Array — What Actually Happens at Each Stage
 
+The default voice destination is ESPHome/Home Assistant Assist. An optional
+[External Voice Backend](docs/external-voice.md) receives accepted voice turns
+through an authenticated WebSocket while EchoMuse retains hardware processing,
+arbitration, local endpointing and playback. The ESPHome facade remains live.
+
 This describes the pipeline as of v2.9.4 (2026-07-18; originally written for v2.7.1): the wake stream is **ungated and AGC-free** — the device streams continuously, and all adaptation lives controller-side as measurement. The only gain in the path is the fixed 24-bit mic gain (v2.7.1). Device-side NS is gone entirely (RNNoise removed 2026-07-12; noise suppression is now controller-side DTLN on the speech-to-text stream only, per-device `nsAsr` flag), and speexdsp AEC (v2.7.3+) sits in the mono path when enabled. One cadence correction to the numbers below: GoTinyAlsa delivers whole ALSA buffers, so the mic loop actually runs on **160ms batches of 2560 frames** (69120 raw bytes), not single 512-frame periods. The stages are in order from hardware to HA.
 
 Why the gate came out (2026-07-06 rework): the VAD gate's absolute RMS threshold is wrong in at least one room of every home, openwakeword is a streaming model that scores best on continuous audio (gated bursts spliced together measurably depress scores even with preroll), and the AGC's persistent gain state on a never-restarting stream rebaselined itself to each room's noise floor — the "wake word degrades over days, reboot fixes it" disease. Bandwidth was the reason for the gate and it doesn't survive arithmetic: 16kHz mono S16 is 32KB/s per device, 6× smaller than the TTS playback stream.
@@ -156,6 +161,7 @@ wake_word_listener():
     — controller-side detection latency means even this is 300–500ms after
     the wake word started). beam_unlock is sent after the turn completes.
   → _run_voice_locked(device, trigger_label="wakeword(score)")
+      → voice backend selector (ESPHome/HA by default; optional external WebSocket)
       → [esphome path] trigger_voice_turn()
           → TurnTrace created (t0 = now)
           → satellite.run_esphome_voice_turn()

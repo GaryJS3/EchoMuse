@@ -97,6 +97,8 @@ import em_shadow
 import em_health
 import em_wake_samples
 import em_oww_warmup
+import em_voice_backend as voice_backend
+import em_external_voice
 import em_barge
 import em_arbiter
 import em_listen
@@ -685,7 +687,7 @@ class Device:
 
         # Wake detection detail for the turn about to start — set by
         # wake_word_listener / _barge_watcher at detection, popped by
-        # em_esphome.trigger_voice_turn into the turn's trace. None for
+        # em_voice_backend.trigger_voice_turn into the turn's trace. None for
         # button/continuation turns.
         self.last_wake: dict | None = None
 
@@ -1868,7 +1870,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     # precedence is a SECOND rule that can disagree with the
                     # first, and would need a way to revoke a claim a
                     # neighbour has already started a turn on.
-                    serves = esphome.can_serve_turn(device.device_id)
+                    serves = voice_backend.can_serve_turn(device.device_id)
                     won_by = device.device_id
                     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
                         # Capture time already carries the link's least
@@ -1879,7 +1881,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                     if device.barge_ceded:
                         log.info(
                             f"[{device.device_id}] Barge-in ceded to "
-                            f"{won_by if serves else 'nothing — no HA'} "
+                            f"{won_by if serves else 'nothing — voice backend unavailable'} "
                             f"(score={score:.3f}) — stopping playback, not "
                             f"taking the turn"
                         )
@@ -1887,7 +1889,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                             device.device_id, "info", "controller",
                             "Barge-in ceded to another device (arbitration)"
                             if serves else
-                            "Barge-in heard but no HA connection",
+                            "Barge-in heard but voice backend unavailable",
                         )
 
                     # Wake detail for the interrupting turn's persistent
@@ -1907,7 +1909,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # a barge in the first milliseconds of audio can beat
                         # it. Serialise anyway — the interrupting turn is the
                         # thing that pays if we lose that race.
-                        esphome.abort_ha_run(device.device_id)
+                        voice_backend.abort_ha_run(device.device_id)
                     else:
                         # Nothing is playing — HA is mid-pipeline, and an
                         # interrupting turn is about to start on the same
@@ -1915,7 +1917,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # old run MUST be aborted upstream first or its tail
                         # events land on the new turn and kill it
                         # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
-                        esphome.cancel_voice_turn(
+                        voice_backend.cancel_voice_turn(
                             device.device_id, abort_ha=True, reason="barged")
                     # Wake sound for a barge that won, after the flush so it
                     # is not heard over the reply it interrupts. A private
@@ -2481,7 +2483,8 @@ def _put_voice_frame(device: Device, chunk: bytes) -> None:
 
 
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
-                            is_wakeword: bool = False, session: int | None = None):
+                            is_wakeword: bool = False, session: int | None = None,
+                            ha_initiated: bool = False):
     """
     session: the private-listening session this turn listens on
     (docs/listening.md), or None for a turn fed by the stream or by a bounded
@@ -2527,7 +2530,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
     await em_player.interrupt(device.device_id)
     try:
         async with device.voice_lock:
-            log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
+            log.info(f"[{device.device_id}] Voice turn starting ({voice_backend.name()} mode)")
             device.listening = True
             await leds_listening(device)
             await _push_device_state(device)
@@ -2571,7 +2574,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                 device.thinking  = True
                 device.listening = False
                 await _push_device_state(device)
-                log.info(f"[{device.device_id}] Thinking (esphome)")
+                log.info(f"[{device.device_id}] Thinking")
                 if not device.cancel_event.is_set() and (
                     spin_task is None or spin_task.done()
                 ):
@@ -2735,7 +2738,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
             while True:
                 should_continue = False
                 try:
-                    should_continue = await esphome.trigger_voice_turn(
+                    should_continue = await voice_backend.trigger_voice_turn(
+                        ha_initiated=ha_initiated,
                         device=device,
                         on_thinking=on_thinking_esphome,
                         post_turn_play=post_turn_play_esphome,
@@ -2754,7 +2758,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                     if not device.barge_detected:
                         await device.mic_stop()
                     await cleanup_esphome()
-                    log.info(f"[{device.device_id}] Voice turn complete (esphome mode)")
+                    log.info(f"[{device.device_id}] Voice turn complete")
 
                 if device.barge_detected and device.barge_ceded:
                     # Another Echo won the interrupting utterance, or there is
@@ -3039,7 +3043,7 @@ def _arbitration_hold() -> float:
     Echoes that could claim count: one with no HA stands down first."""
     return em_listen.arbitration_hold(
         em_listen.detector(d.listen_view, d.oww_trigger_capable)
-        for d in list(_devices.values()) if esphome.can_serve_turn(d.device_id)
+        for d in list(_devices.values()) if voice_backend.can_serve_turn(d.device_id)
     )
 
 
@@ -3137,7 +3141,7 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
         "noise_floor": round(device.noise_floor, 5),
     }
 
-    serves = esphome.can_serve_turn(device.device_id)
+    serves = voice_backend.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
@@ -3147,12 +3151,12 @@ async def _private_wake_turn(device: Device, ev: dict) -> None:
         device.last_wake = None
         await device.listen_close(session, "no_ha" if not serves else "ceded")
         if not serves:
-            await esphome.record_dropped_wake(device, f"wakeword({score:.3f})", wake_info)
+            await voice_backend.record_dropped_wake(device, f"wakeword({score:.3f})", wake_info)
             await _leds_turn_end(device)
-            log.info(f"[{device.device_id}] Wake heard but no HA connection — standing down "
+            log.info(f"[{device.device_id}] Wake heard but voice backend unavailable — standing down "
                      f"(score={score:.3f})")
             em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
-                          "Wake heard but no HA connection")
+                          "Wake heard but voice backend unavailable")
         else:
             # The Echo lit its own listening ring at the crossing; nothing on
             # a ceding path darkens it otherwise.
@@ -3203,7 +3207,7 @@ async def _private_barge(device: Device, ev: dict) -> None:
     em_dbwriter.submit(db.log_device, device.device_id, "info", "device",
                   f"Barge-in during {phase} (score={score:.3f})")
     device.barge_detected = True
-    serves = esphome.can_serve_turn(device.device_id)
+    serves = voice_backend.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
         won_by = await _claim_wake(device, _wake_heard_at(device, ev),
@@ -3212,7 +3216,7 @@ async def _private_barge(device: Device, ev: dict) -> None:
     if device.barge_ceded:
         await device.listen_close(session, "ceded")
         log.info(f"[{device.device_id}] Barge-in ceded to "
-                 f"{won_by if serves else 'nothing — no HA'} — stopping playback, "
+                 f"{won_by if serves else 'nothing — voice backend unavailable'} — stopping playback, "
                  f"not taking the turn")
     else:
         # The interrupting turn reads this session. Opened in the router now,
@@ -3232,9 +3236,9 @@ async def _private_barge(device: Device, ev: dict) -> None:
     device.cancel_event.set()
     if in_playback:
         await device.send_control({"type": "speaker_flush"})
-        esphome.abort_ha_run(device.device_id)
+        voice_backend.abort_ha_run(device.device_id)
     else:
-        esphome.cancel_voice_turn(device.device_id, abort_ha=True, reason="barged")
+        voice_backend.cancel_voice_turn(device.device_id, abort_ha=True, reason="barged")
 
 
 async def _stream_listen(device: Device):
@@ -3670,7 +3674,7 @@ async def _stream_listen(device: Device):
                         buf.clear()
                         device.cancel_event.clear()
                         # Wake detail for the turn's persistent record —
-                        # popped by esphome.trigger_voice_turn.
+                        # popped by voice_backend.trigger_voice_turn.
                         # float(): OWW scores are numpy float32 — sqlite3
                         # stores those as a 4-byte BLOB, which then breaks
                         # JSON serialisation of the row (2026-07-14).
@@ -3735,7 +3739,7 @@ async def _stream_listen(device: Device):
                         # trigger_voice_turn refuses on — so a device counted
                         # as able cannot turn out to be unable a tick later
                         # for any reason the controller already knows about.
-                        serves = esphome.can_serve_turn(device.device_id)
+                        serves = voice_backend.can_serve_turn(device.device_id)
                         won_by = device.device_id
                         if serves and device.wake_arb_ms > 0 and len(_devices) > 1:
                             # No wait unless the fleet is mixed (Echoes
@@ -3779,7 +3783,7 @@ async def _stream_listen(device: Device):
                                 # Assistant is not (the orange flash). Three
                                 # facts, and none of them is a state light:
                                 # it self-clears on the device's own ticker.
-                                await esphome.record_dropped_wake(
+                                await voice_backend.record_dropped_wake(
                                     device, f"wakeword({score:.3f})", wake_info
                                 )
                                 await _leds_turn_end(device)
@@ -3791,7 +3795,7 @@ async def _stream_listen(device: Device):
                                 )
                                 em_dbwriter.submit(db.log_device,
                                     device.device_id, "info", "controller",
-                                    "Wake heard but no HA connection"
+                                    "Wake heard but voice backend unavailable"
                                 )
                                 await model_reset
                                 continue
@@ -3946,7 +3950,7 @@ async def handle_button_event(device: Device, event: dict):
         if action == em_button.CANCEL:
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
-            esphome.cancel_voice_turn(device.device_id, reason="cancelled")
+            voice_backend.cancel_voice_turn(device.device_id, reason="cancelled")
             # Flush the device's speaker too, or cancelling DURING the spoken
             # response only stops the controller feeding it: the ring clears
             # while up to ~5.5s already in audioChanDepth plays out, and the
@@ -3957,7 +3961,7 @@ async def handle_button_event(device: Device, event: dict):
             # for exactly the same reason; the button was the one deliberate
             # cancel that did not.
             await device.send_control({"type": "speaker_flush"})
-        elif not esphome.can_serve_turn(device.device_id):
+        elif not voice_backend.can_serve_turn(device.device_id):
             # Same stand-down as the wake path, and it needs to be here too:
             # the button is the control someone reaches for precisely when
             # the wake word appears to have done nothing, so it is the worst
@@ -3966,10 +3970,10 @@ async def handle_button_event(device: Device, event: dict):
             log.info(f"[{device.device_id}] Dot button but no HA connection — standing down")
             em_dbwriter.submit(db.log_device,
                 device.device_id, "info", "controller",
-                "Button pressed but no HA connection"
+                "Button pressed but voice backend unavailable"
             )
             await leds_listening(device)
-            await esphome.record_dropped_wake(device, "button", None)
+            await voice_backend.record_dropped_wake(device, "button", None)
             await _leds_turn_end(device)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
@@ -4412,6 +4416,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             # not hear it, and telling HA it finished successfully would be
             # untrue — it is the one thing the announcement reply reports.
             return not _d.cancel_event.is_set()
+        em_external_voice.backend.register_device(device_id, _standalone_play)
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         async def _ring_alarm(_d=_device_ref) -> None:
@@ -4452,6 +4457,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     _d,
                     trigger_label=esphome.CONVERSATION_TRIGGER,
                     is_wakeword=False,
+                    ha_initiated=True,
                 )
             finally:
                 # Back to the ch6 omni wake stream, exactly as the button turn
@@ -4569,7 +4575,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                 f"cancelling"
                             )
                             device.cancel_event.set()
-                            esphome.cancel_voice_turn(device_id, reason="muted")
+                            voice_backend.cancel_voice_turn(device_id, reason="muted")
                             await device.send_control({"type": "speaker_flush"})
                         await api._push_event({
                             "type":      "device_update",
@@ -5120,6 +5126,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 em_dbwriter.submit(db.touch_device_seen, device.device_id)
+                em_external_voice.backend.cancel_voice_turn(device.device_id, reason="disconnect")
                 _devices.pop(device.device_id, None)
                 # #315: the services stay up for a grace window instead of
                 # being torn down immediately — a four-second link blip used
@@ -5149,6 +5156,7 @@ async def _release_device_services(device) -> None:
             f"{CONTROL_RECONNECT_GRACE_S:.0f}s — releasing services"
         )
         await api.notify_device_disconnected(device.device_id)
+        em_external_voice.backend.device_gone(device.device_id)
         await esphome.device_disconnected(device.device_id)
         await em_ble_proxy.device_disconnected(device.device_id)
         em_player.device_gone(device.device_id)

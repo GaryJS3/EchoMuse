@@ -1862,7 +1862,7 @@ def test_the_button_path_stands_down_the_same_way():
     nothing, so answering it with silence is the worst version of this bug.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    assert src.count("esphome.can_serve_turn") >= 2, (
+    assert src.count("voice_backend.can_serve_turn") >= 2, (
         "both the wake path and the button path must ask; a turn that cannot "
         "reach HA should never hold the voice lock"
     )

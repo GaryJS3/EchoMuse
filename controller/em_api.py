@@ -77,6 +77,8 @@ import em_oww_models
 import em_pairing
 import em_pki
 import em_player
+import em_voice_backend
+import em_external_voice
 import em_recordings
 import em_wake_samples
 import em_volume
@@ -355,6 +357,11 @@ async def create_app() -> web.Application:
     Routes are registered here. The app is not started — the caller
     creates an AppRunner and TCPSite.
     """
+    selected = await asyncio.to_thread(db.get_config, "voiceBackend", "esphome")
+    em_voice_backend.configure(selected)
+    em_external_voice.backend.get_device = _devices.get
+    em_external_voice.backend.persist = _persist_external_turn
+
     # client_max_size defaults to 1 MB in aiohttp and the firmware is ~10.7 MB,
     # so /api/releases/upload rejects every real binary without this. Both
     # callers post there: the dashboard's Local Build panel and
@@ -403,6 +410,8 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/auth/logout",          _post_logout)
     app.router.add_get("/api/auth/me",               _get_me)
     app.router.add_post("/api/auth/change-password", _post_change_password)
+    app.router.add_get("/api/voice", _ws_voice)
+    app.on_cleanup.append(_close_external_voice)
 
     # Users — roles. There was no way to change one at all until 2026-08-14,
     # which only became load-bearing when ingress started provisioning
@@ -3446,6 +3455,30 @@ async def _exec_shell(live, cmd: str) -> None:
         await _release_shell_ws(live.device_id, live)
 
 
+async def _persist_external_turn(device, record):
+    import em_esphome
+    await em_esphome._persist_turn(device, record)
+    await _push_event({"type": "turn_complete", "device_id": device.device_id, "turn": record})
+
+
+async def _close_external_voice(app):
+    client = em_external_voice.backend.client
+    if client is not None:
+        await client.close(code=1001, message=b"Controller shutting down")
+        await em_external_voice.backend.release(client)
+
+
+async def _ws_voice(request: web.Request) -> web.WebSocketResponse:
+    """WS /api/voice — one admin-owned external voice backend."""
+    user = await auth.ws_resolve_session(request)
+    if user is None:
+        raise web.HTTPUnauthorized()
+    if user["role"] != "admin":
+        raise web.HTTPForbidden()
+    return await em_external_voice.backend.websocket(
+        request, CONTROLLER_VERSION, em_voice_backend.name())
+
+
 # ─── Shell WebSocket proxy (interactive dashboard terminal) ───────────────────
 
 async def _ws_shell(request: web.Request) -> web.WebSocketResponse:
@@ -4052,6 +4085,7 @@ async def _get_system_config(request: web.Request) -> web.Response:
     config = await loop.run_in_executor(None, db.get_all_config)
     # Don't expose schema_version — internal detail
     config.pop("schema_version", None)
+    config.setdefault("voiceBackend", "esphome")
     return _ok(config)
 
 
@@ -4068,8 +4102,11 @@ async def _patch_system_config(request: web.Request) -> web.Response:
         "session_expiry_days",
         "update_check_interval",
         "github_repo",
+        "voiceBackend",
     }
     body = await _json_body(request)
+    if "voiceBackend" in body and body["voiceBackend"] not in ("esphome", "external"):
+        return _error("invalid_config", "voiceBackend must be esphome or external", 400)
     loop = asyncio.get_event_loop()
 
     updated = {}
@@ -4079,6 +4116,8 @@ async def _patch_system_config(request: web.Request) -> web.Response:
             unknown.append(key)
             continue
         await loop.run_in_executor(None, db.set_config, key, str(value))
+        if key == "voiceBackend":
+            em_voice_backend.configure(value)
         updated[key] = value
 
     if unknown:

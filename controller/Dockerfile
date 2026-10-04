@@ -122,6 +122,9 @@ COPY em_platform.py .
 COPY em_wsclose.py .
 COPY em_rttlog.py .
 COPY em_esphome.py .
+COPY em_voice_backend.py .
+COPY em_external_voice.py .
+COPY em_audio_stream.py .
 COPY em_ble_health.py .
 COPY em_config_types.py .
 COPY em_dbwriter.py .

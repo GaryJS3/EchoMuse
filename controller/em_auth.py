@@ -303,14 +303,19 @@ async def ws_resolve_session(request: web.Request) -> Optional[dict]:
     """
     Resolve auth for a WebSocket upgrade request.
 
-    WebSocket clients cannot set the Authorization header in-browser,
-    so this checks only the session cookie. API clients using a token
-    can pass it as a query parameter: ?token=<token>.
+    Browser clients use the session cookie or ?token=<token>. Non-browser
+    clients can use Authorization: Bearer <token> without a token in the URL.
 
     Returns user dict or None.
     """
     # Check cookie first
     token = request.cookies.get(AUTH_COOKIE, "").strip()
+
+    if not token:
+        header = request.headers.get("Authorization", "")
+        scheme, _, value = header.partition(" ")
+        if scheme.lower() == "bearer":
+            token = value.strip()
 
     # Fall back to query param (for non-browser clients / xterm.js)
     if not token:

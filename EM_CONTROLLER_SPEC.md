@@ -26,6 +26,13 @@ The EchoMuse controller (`em_controller.py`) gains three additions:
 
 Everything runs in a single Python process. No additional services required.
 
+Voice turns use ESPHome/Home Assistant Assist by default. The controller-wide
+`voiceBackend` system setting can select an authenticated external application
+through `WS /api/voice`; hardware behavior, arbitration, local endpointing and
+playback remain in EchoMuse, and the ESPHome facade stays live for HA media and
+entities. See [External Voice Backend](docs/external-voice.md) for the versioned
+protocol and failure behavior.
+
 ---
 
 ## Device Identity
@@ -424,6 +431,7 @@ return error("device_not_found", f"No device with id {device_id}", 404)
 | `GET` | `/api/system/status` | readonly | Controller uptime, connected count, mode |
 | `GET` | `/api/system/config` | admin | Server config (approval mode etc.) |
 | `PATCH` | `/api/system/config` | admin | Update server config |
+| `WS` | `/api/voice` | admin | One external voice backend; accepted turns and announcements |
 
 ### Dashboard Shell WebSocket
 
