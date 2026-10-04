@@ -3156,7 +3156,9 @@ async def _sync_start_script(live, device_id: str) -> None:
     """
     path = "/data/local/bin/start_server.sh"
     try:
-        script = (PAYLOADS_DIR / "start_server.sh").read_bytes()
+        # Normalize at delivery too: a Windows checkout or uploaded source
+        # snapshot must never put CR into Android's shebang interpreter path.
+        script = (PAYLOADS_DIR / "start_server.sh").read_bytes().replace(b"\r\n", b"\n")
     except OSError as e:
         log.error(f"[api] start_server.sh payload unreadable — skipping sync: {e}")
         return
@@ -3318,7 +3320,7 @@ async def _sync_debloat(live, device_id: str) -> None:
     """
     # ── half 1: the boot script ──────────────────────────────────────────────
     try:
-        script = (PAYLOADS_DIR / "echomuse-debloat.sh").read_bytes()
+        script = (PAYLOADS_DIR / "echomuse-debloat.sh").read_bytes().replace(b"\r\n", b"\n")
     except OSError as e:
         log.error(f"[api] echomuse-debloat.sh payload unreadable — skipping sync: {e}")
         script = None
