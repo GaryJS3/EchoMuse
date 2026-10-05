@@ -65,6 +65,7 @@ class Turn:
     playback_ms: float = -1
     tts_bytes: int = 0
     finished: asyncio.Event = field(default_factory=asyncio.Event)
+    continue_conversation: bool = False
 
     def message(self, kind, **values):
         return dict(type=kind, sessionId=self.session_id,
@@ -224,7 +225,8 @@ class ExternalVoiceBackend:
                 device.turn_history.append(record)
                 device.last_turn_outcome = turn.outcome
             turn.finished.set()
-        return False
+        return (turn.continue_conversation and turn.outcome == "ok"
+                and not turn.cancelled.is_set() and not device.cancel_event.is_set())
 
     async def _run(self, turn, wake, trigger, discard, on_thinking, play):
         info = dict(trigger="wakeword" if trigger.startswith("wakeword") else trigger,
@@ -263,6 +265,7 @@ class ExternalVoiceBackend:
         if not count:
             raise RuntimeError("response contained no playable audio")
         turn.outcome = "ok"
+        turn.continue_conversation = message.get("continueConversation", False)
         await self.send(turn.owner, turn.message("play_finished"))
 
     async def _input(self, turn, discard):
@@ -357,12 +360,15 @@ class ExternalVoiceBackend:
                 raise ValueError("session is not awaiting a response")
             if kind == "turn_response":
                 _url(message)
+                if not isinstance(message.get("continueConversation", False), bool):
+                    raise ValueError("invalid continueConversation")
                 if "text" in message and (not isinstance(message["text"], str) or len(message["text"]) > MAX_TEXT):
                     raise ValueError("invalid text")
             elif not isinstance(message.get("message", ""), str):
                 raise ValueError("invalid error message")
             # Store only fields the controller needs, bounded independently.
             turn.response.set_result(dict(type=kind, audioUrl=message.get("audioUrl"),
+                                          continueConversation=message.get("continueConversation", False),
                                           message=message.get("message", "")[:MAX_ERROR]))
             log.info("[%s] External session %s received %s", device_id, session_id, kind)
             return

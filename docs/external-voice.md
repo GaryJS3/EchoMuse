@@ -55,6 +55,11 @@ The connection receives:
 {"type":"hello","protocolVersion":1,"controllerVersion":"...","voiceBackend":"external"}
 ```
 
+`turn_response` accepts an optional boolean `continueConversation` (default false).
+After successful playback, true reopens the mic through the existing continuation
+loop and emits a fresh `turn_start` with trigger `continuation`. Cancelled, failed,
+or silent turns never continue. The external application retains conversation state.
+
 Protocol version 1 uses JSON text messages only. The backend is ready after
 `hello`; no separate negotiation or fleet subscription is needed. It can connect
 while `esphome` is selected, but voice turns and external announcements require

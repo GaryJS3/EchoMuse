@@ -144,7 +144,8 @@ def test_readiness_and_exclusive_connection_slot():
     asyncio.run(main())
 
 
-def test_turn_order_metadata_audio_and_response_playback():
+@pytest.mark.parametrize("continuation", [None, False, True])
+def test_turn_order_metadata_audio_and_response_playback(continuation):
     async def main():
         backend, ws = connected()
         device = Device()
@@ -158,8 +159,9 @@ def test_turn_order_metadata_audio_and_response_playback():
         assert base64.b64decode(audio["data"]) == b"\x00\x10" * 1280
         assert all(m["sessionId"] == turn.session_id and m["deviceId"] == "echo" for m in ws.messages)
         assert end["reason"] == "speech_end"
-        await backend.handle(ws, reply(turn, audioUrl="http://test/response.wav"))
-        assert await task is False
+        fields = {} if continuation is None else {"continueConversation": continuation}
+        await backend.handle(ws, reply(turn, audioUrl="http://test/response.wav", **fields))
+        assert await task is (continuation is True)
         assert device.played == [b"response PCM"]
         assert [m["type"] for m in ws.messages][-3:] == ["play_started", "play_finished", "turn_finished"]
         with pytest.raises(ValueError):
@@ -185,10 +187,10 @@ def test_disconnect_cleans_every_turn_phase(stage):
         if stage != "listening":
             await until(lambda: device.thinking)
         if stage == "speaking":
-            await backend.handle(ws, reply(turn, audioUrl="http://test/audio"))
+            await backend.handle(ws, reply(turn, audioUrl="http://test/audio", continueConversation=True))
             await playback.wait()
         await backend.release(ws)
-        await task
+        assert await task is False
         assert not backend.turns and not backend.can_serve_turn("echo")
         assert device.cancel_event.is_set()
         assert {"type": "speaker_flush"} in device.controls
