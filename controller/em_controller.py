@@ -4416,7 +4416,14 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             # not hear it, and telling HA it finished successfully would be
             # untrue — it is the one thing the announcement reply reports.
             return not _d.cancel_event.is_set()
-        em_external_voice.backend.register_device(device_id, _standalone_play)
+        async def _feedback_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
+            # The active turn already owns voice_lock. Preserve its mic and
+            # cancellation state; never run the standalone announcement wrapper.
+            if _d.cancel_event.is_set():
+                return False
+            await _run_post_turn_playback(_d, pcm_bytes)
+            return not _d.cancel_event.is_set()
+        em_external_voice.backend.register_device(device_id, _standalone_play, tone=_feedback_play)
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         async def _ring_alarm(_d=_device_ref) -> None:

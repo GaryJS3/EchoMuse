@@ -396,7 +396,7 @@ def test_real_websocket_auth_ownership_hello_and_bad_messages(monkeypatch):
                 assert error.value.status == status
                 assert backend.client is None
             ws = await client.ws_connect("/api/voice", headers={"Authorization": "Bearer admin"})
-            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome")
+            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True)
             assert backend.can_serve_turn("echo")
             with pytest.raises(WSServerHandshakeError) as error:
                 await client.ws_connect("/api/voice?token=admin")
@@ -431,7 +431,7 @@ def test_controller_preserves_readiness_placement_and_esphome_servers():
     assert "esphome.start_esphome_servers(" in source
     assert "await esphome.device_connected(" in source
     assert "_run_streaming_post_turn_playback(" in source
-    assert "em_external_voice.backend.register_device(device_id, _standalone_play)" in source
+    assert "em_external_voice.backend.register_device(device_id, _standalone_play, tone=_feedback_play)" in source
     assert "stop_esphome" not in (ROOT / "em_voice_backend.py").read_text()
 
 
@@ -637,4 +637,79 @@ def test_existing_controller_lifecycle_restores_state_and_music(monkeypatch, sta
         assert mic_stops and released == ["echo"]
         assert media == ["interrupt", "resume"]
         assert not backend.turns
+    asyncio.run(main())
+
+@pytest.mark.parametrize("phase", ["listening", "thinking"])
+def test_feedback_uses_active_session_without_releasing_voice_lock(phase):
+    async def main():
+        backend, ws = connected()
+        device = Device()
+        await device.voice_lock.acquire()
+        turn = external.Turn(device, ws, phase=phase)
+        turn.response = asyncio.get_running_loop().create_future()
+        backend.turns[turn.session_id] = turn
+        played = []
+        async def tone(pcm):
+            assert device.voice_lock.locked()
+            assert turn.feedback_active
+            played.append(pcm)
+            return True
+        backend.register_device("echo", lambda pcm: pytest.fail("standalone announcement"), tone=tone)
+        message = dict(type="tone", sessionId=turn.session_id, requestId="cue", deviceId="echo", audioUrl="http://test/audio")
+        with pytest.raises(ValueError):
+            await backend.handle(Socket(), message)
+        with pytest.raises(ValueError):
+            await backend.handle(ws, {**message, "sessionId": "stale"})
+        await backend.handle(ws, message)
+        await until(lambda: not backend.plays and len(ws.messages) == 2)
+        assert played == [b"response PCM"]
+        assert device.voice_lock.locked()
+        assert not turn.feedback_active and not device.cancel_event.is_set()
+        assert not turn.response.done() and backend.turns[turn.session_id] is turn
+        assert [m["type"] for m in ws.messages] == ["play_started", "play_finished"]
+        assert all(m["sessionId"] == turn.session_id and m["requestId"] == "cue" for m in ws.messages)
+        with pytest.raises(ValueError):
+            await backend.handle(ws, message)
+        device.voice_lock.release()
+    asyncio.run(main())
+
+
+def test_feedback_stop_does_not_cancel_voice_and_response_can_follow():
+    async def main():
+        backend, ws = connected()
+        device = Device()
+        turn = external.Turn(device, ws, phase="thinking")
+        turn.response = asyncio.get_running_loop().create_future()
+        backend.turns[turn.session_id] = turn
+        reached = asyncio.Event()
+        async def tone(pcm):
+            reached.set()
+            await asyncio.Event().wait()
+        backend.register_device("echo", lambda pcm: None, tone=tone)
+        await backend.handle(ws, dict(type="tone", sessionId=turn.session_id, requestId="cue", deviceId="echo", audioUrl="http://test/audio"))
+        await reached.wait()
+        await backend.handle(ws, dict(type="stop", requestId="cue", deviceId="echo"))
+        await until(lambda: not backend.plays and ws.messages[-1]["type"] == "play_finished")
+        assert not device.cancel_event.is_set() and not turn.cancelled.is_set()
+        assert not turn.feedback_active
+        await backend.handle(ws, reply(turn, audioUrl="http://test/response"))
+        assert turn.response.done()
+    asyncio.run(main())
+
+
+def test_capture_discards_feedback_audio_but_keeps_user_speech():
+    async def main():
+        backend, ws = connected()
+        device = Device()
+        turn = external.Turn(device, ws, feedback_active=True)
+        task = asyncio.create_task(backend._input(turn, 0))
+        device.voice_queue.put_nowait(b"\x00\x10" * 1280)
+        await until(lambda: device.voice_queue.empty())
+        assert not ws.messages and turn.audio_bytes == 0
+        turn.feedback_active = False
+        device.voice_queue.put_nowait(b"\x00\x10" * 1280)
+        device.voice_queue.put_nowait("vad_end")
+        assert await task == "speech_end"
+        assert len(ws.messages) == 1 and ws.messages[0]["type"] == "audio"
+        assert turn.audio_bytes == 2560
     asyncio.run(main())

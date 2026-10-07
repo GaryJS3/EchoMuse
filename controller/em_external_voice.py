@@ -66,6 +66,9 @@ class Turn:
     tts_bytes: int = 0
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     continue_conversation: bool = False
+    feedback_active: bool = False
+    feedback_request: str | None = None
+    feedback_ids: set = field(default_factory=set)
 
     def message(self, kind, **values):
         return dict(type=kind, sessionId=self.session_id,
@@ -80,15 +83,19 @@ class ExternalVoiceBackend:
         self.turns = {}
         self.plays = {}
         self._play_callbacks = {}
+        self._tone_callbacks = {}
         self.get_device = lambda device_id: None
         self.persist = None
 
-    def register_device(self, device_id, play):
+    def register_device(self, device_id, play, tone=None):
         self._play_callbacks[device_id] = play
+        if tone is not None:
+            self._tone_callbacks[device_id] = tone
 
     def device_gone(self, device_id):
         self.cancel_voice_turn(device_id, reason="disconnect")
         self._play_callbacks.pop(device_id, None)
+        self._tone_callbacks.pop(device_id, None)
 
     def claim(self, client):
         if self.client is not None:
@@ -196,6 +203,10 @@ class ExternalVoiceBackend:
         finally:
             # Invalidate before any await. Late responses can never revive it.
             self.turns.pop(turn.session_id, None)
+            feedback = self.plays.get((turn.feedback_request, device.device_id))
+            if feedback is not None:
+                feedback.cancel()
+                await asyncio.gather(feedback, return_exceptions=True)
             for task in (work, cancel, aborted):
                 task.cancel()
             await asyncio.gather(work, cancel, aborted, return_exceptions=True)
@@ -304,6 +315,10 @@ class ExternalVoiceBackend:
                     return "no_speech_timeout" if payload == "vad_no_speech_timeout" else "speech_end"
                 if not isinstance(payload, bytes) or len(payload) > MAX_CHUNK or len(payload) % 2:
                     raise ValueError("invalid microphone chunk")
+                # Feedback is not user speech. Keep consuming capture without restarting
+                # the microphone or feeding our own wake cue to the speech gate.
+                if turn.feedback_active:
+                    continue
                 if discard:
                     discard -= 1
                     continue
@@ -347,6 +362,32 @@ class ExternalVoiceBackend:
             raise ValueError("message must be an object")
         kind = _string(message, "type")
         device_id = _string(message, "deviceId")
+        if kind == "tone":
+            session_id = _string(message, "sessionId")
+            request_id = _string(message, "requestId")
+            turn = self.turns.get(session_id)
+            key = (request_id, device_id)
+            if (turn is None or turn.owner is not owner or turn.device.device_id != device_id
+                    or turn.cancelled.is_set() or turn.device.cancel_event.is_set()
+                    or turn.phase not in ("listening", "thinking") or turn.response.done()
+                    or request_id in turn.feedback_ids or len(turn.feedback_ids) >= 64
+                    or device_id not in self._tone_callbacks
+                    or any(target == device_id for _, target in self.plays)):
+                raise ValueError("unknown, stale or busy feedback session")
+            url = _url(message)
+            turn.feedback_active = True
+            turn.feedback_request = request_id
+            turn.feedback_ids.add(request_id)
+            task = asyncio.create_task(self._tone(owner, key, turn, url))
+            self.plays[key] = task
+            def cleanup(done):
+                if self.plays.get(key) is done:
+                    self.plays.pop(key, None)
+                if turn.feedback_request == request_id:
+                    turn.feedback_active = False
+                    turn.feedback_request = None
+            task.add_done_callback(cleanup)
+            return
         if kind in ("turn_response", "turn_error", "turn_cancel"):
             session_id = _string(message, "sessionId")
             turn = self.turns.get(session_id)
@@ -358,6 +399,8 @@ class ExternalVoiceBackend:
                 return
             if turn.phase != "thinking" or turn.response.done():
                 raise ValueError("session is not awaiting a response")
+            if turn.feedback_active:
+                raise ValueError("feedback playback is still active")
             if kind == "turn_response":
                 _url(message)
                 if not isinstance(message.get("continueConversation", False), bool):
@@ -401,6 +444,49 @@ class ExternalVoiceBackend:
         task.add_done_callback(lambda done: self.plays.pop(key, None)
                                if self.plays.get(key) is done else None)
 
+    async def _tone(self, owner, key, turn, url):
+        status = dict(requestId=key[0], deviceId=key[1], sessionId=turn.session_id)
+        try:
+            async with asyncio.timeout(5):
+                pcm = bytearray()
+                async with contextlib.aclosing(em_audio_stream._stream_tts_audio(url)) as chunks:
+                    async for chunk in chunks:
+                        if len(pcm) + len(chunk) > 48000 * 2 * 3:
+                            raise ValueError("feedback exceeds three seconds")
+                        pcm.extend(chunk)
+                if not pcm or turn.cancelled.is_set() or turn.device.cancel_event.is_set():
+                    raise ValueError("feedback unavailable")
+                await self.send(owner, dict(type="play_started", **status))
+                if await self._tone_callbacks[turn.device.device_id](bytes(pcm)) is False:
+                    raise RuntimeError("feedback cancelled")
+                # Clear before acknowledging so the next cue/response can follow.
+                turn.feedback_active = False
+                turn.feedback_request = None
+                self.plays.pop(key, None)
+                await self.send(owner, dict(type="play_finished", **status))
+        except asyncio.CancelledError:
+            if turn.feedback_request == key[0]:
+                turn.feedback_active = False
+                turn.feedback_request = None
+            self.plays.pop(key, None)
+            with contextlib.suppress(Exception):
+                await turn.device.send_control({"type": "speaker_flush"})
+                await self.send(owner, dict(type="play_finished", reason="cancelled", **status))
+        except Exception:
+            if turn.feedback_request == key[0]:
+                turn.feedback_active = False
+                turn.feedback_request = None
+            self.plays.pop(key, None)
+            with contextlib.suppress(Exception):
+                await turn.device.send_control({"type": "speaker_flush"})
+                await self.send(owner, dict(type="play_failed", message="feedback failed", **status))
+        finally:
+            if turn.feedback_request == key[0]:
+                turn.feedback_active = False
+                turn.feedback_request = None
+            if self.plays.get(key) is asyncio.current_task():
+                self.plays.pop(key, None)
+
     async def _play(self, owner, key, device, url):
         status = dict(requestId=key[0], deviceId=key[1])
         try:
@@ -442,7 +528,8 @@ class ExternalVoiceBackend:
         try:
             await ws.prepare(request)
             await self.send(ws, dict(type="hello", protocolVersion=1,
-                                     controllerVersion=controller_version, voiceBackend=voice_backend))
+                                     controllerVersion=controller_version, voiceBackend=voice_backend,
+                                     feedbackPlayback=True))
             self.ready = True
             async for incoming in ws:
                 if incoming.type != web.WSMsgType.TEXT:
