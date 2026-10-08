@@ -3613,6 +3613,14 @@ const _MAGISK_SHA256    = '18e46b16b25ebe691c282fe311beccd4811cd533848a64e2efbd7
 // v2.15.0-37 build, 335 in the v2.15.0 release, 0 in a boot image). It
 // cannot say the binary will LOAD on this device — that needs running it,
 // and the server has no mode that does only that.
+// BusyBox df can wrap the device name onto its own line. Only accept
+// explicitly labelled 1K blocks; an unknown format must not mean zero space.
+function _provisionFreeBytes(output) {
+  if (!/1[Kk]-blocks|1024-blocks/.test(output)) return null;
+  const row = output.match(/\s\d+\s+\d+\s+(\d+)\s+\d+%\s+\/\S*/);
+  return row ? Number(row[1]) * 1024 : null;
+}
+
 function _serverBinaryVerdict(bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (u8.length < 52 || u8[0] !== 0x7f || u8[1] !== 0x45 || u8[2] !== 0x4c || u8[3] !== 0x46) {
@@ -6563,6 +6571,20 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
     const verdict = _serverBinaryVerdict(buf);
     if (!verdict.ok) throw new Error(`${verdict.reason} Nothing has been installed.`);
+    // /sdcard staging and the installed copy normally share /data. Leave
+    // room for both copies and the following wake-word asset step. Check
+    // before cat starts: a full filesystem closes its socket mid-upload.
+    addLog('Checking free space for the binary and wake word assets…');
+    const storage = await c.shell('su -c "df -k /data" 2>&1');
+    const free = _provisionFreeBytes(storage);
+    const required = 2 * buf.byteLength + 20 * 1024 * 1024;
+    if (free === null) {
+      throw new Error(`Could not determine free space on /data. Check device storage before retrying. df output: ${storage}`);
+    }
+    if (free < required) {
+      throw new Error(`/data has ${(free / 1024 / 1024).toFixed(1)} MB free; this install needs at least ${Math.ceil(required / 1024 / 1024)} MB for staging, the installed binary and wake word assets. Free space in TWRP, then Retry. Keep your downloaded boot backup and preserve /data/nvram. Nothing has been uploaded by this attempt.`);
+    }
+    addLog(`  /data: ${(free / 1024 / 1024).toFixed(1)} MB free`);
     await c.push('/sdcard/server_new', new Uint8Array(buf),
       pct => setProgress({ label: 'Uploading binary', pct }));
     setProgress(null);

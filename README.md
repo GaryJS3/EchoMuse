@@ -1,5 +1,8 @@
 # EchoMuse
 
+Fork documentation: [External voice backend](docs/external-voice.md).
+Ancillary fixes are listed separately under [Other changes](docs/other-changes.md).
+
 **Turn an old Amazon Echo Dot (2nd gen) into a local voice assistant for Home Assistant.**
 
 [![CI](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/ci.yml)
