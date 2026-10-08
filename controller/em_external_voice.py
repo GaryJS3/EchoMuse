@@ -362,6 +362,30 @@ class ExternalVoiceBackend:
             raise ValueError("message must be an object")
         kind = _string(message, "type")
         device_id = _string(message, "deviceId")
+        if kind == "set_volume":
+            if owner is not self.client or not self.ready:
+                raise ValueError("external backend does not own this connection")
+            import math
+            import em_volume
+            import em_esphome
+            request_id = _string(message, "requestId")
+            volume = message.get("volume")
+            device = self.get_device(device_id)
+            valid = (type(volume) in (int, float) and math.isfinite(volume)
+                     and 0 <= volume <= 1 and device is not None
+                     and device_id in self._play_callbacks)
+            if not valid:
+                await self.send(owner, dict(type="volume_result", deviceId=device_id,
+                                           requestId=request_id, status="rejected"))
+                return
+            level = em_volume.ha_volume_to_device(volume)
+            server = em_esphome.get_server(device_id)
+            if server is not None:
+                server.output_mute.volume_set(level)
+            await device.send_control(dict(type="volume_set", level=level))
+            await self.send(owner, dict(type="volume_result", deviceId=device_id,
+                                       requestId=request_id, status="sent"))
+            return
         if kind == "tone":
             session_id = _string(message, "sessionId")
             request_id = _string(message, "requestId")
@@ -529,7 +553,7 @@ class ExternalVoiceBackend:
             await ws.prepare(request)
             await self.send(ws, dict(type="hello", protocolVersion=1,
                                      controllerVersion=controller_version, voiceBackend=voice_backend,
-                                     feedbackPlayback=True))
+                                     feedbackPlayback=True, volumeControl=True))
             self.ready = True
             async for incoming in ws:
                 if incoming.type != web.WSMsgType.TEXT:

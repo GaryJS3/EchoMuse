@@ -78,6 +78,34 @@ def connected():
     return backend, ws
 
 
+@pytest.mark.asyncio
+async def test_volume_targets_connected_device_and_uses_codec_scale(monkeypatch):
+    import em_volume
+    mute = SimpleNamespace(volume_set=lambda level: levels.append(level))
+    levels = []
+    monkeypatch.setitem(sys.modules, "em_esphome", SimpleNamespace(
+        get_server=lambda device_id: SimpleNamespace(output_mute=mute)))
+    backend, ws = connected()
+    device = Device()
+    backend.get_device = lambda device_id: device if device_id == "echo" else None
+    backend.register_device("echo", device.play)
+    await backend.handle(ws, dict(type="set_volume", deviceId="echo",
+                                 requestId="volume1", volume=.5))
+    level = em_volume.ha_volume_to_device(.5)
+    assert device.controls == [dict(type="volume_set", level=level)]
+    assert levels == [level]
+    assert ws.messages[-1] == dict(type="volume_result", deviceId="echo",
+                                   requestId="volume1", status="sent")
+    for value in (-1, 2, True, "0.5", float("nan")):
+        await backend.handle(ws, dict(type="set_volume", deviceId="echo",
+                                     requestId="invalid", volume=value))
+        assert ws.messages[-1]["status"] == "rejected"
+    await backend.handle(ws, dict(type="set_volume", deviceId="other",
+                                 requestId="missing", volume=.5))
+    assert ws.messages[-1]["status"] == "rejected"
+    assert len(device.controls) == 1
+
+
 async def until(predicate):
     async with asyncio.timeout(1):
         while not predicate():
@@ -396,7 +424,7 @@ def test_real_websocket_auth_ownership_hello_and_bad_messages(monkeypatch):
                 assert error.value.status == status
                 assert backend.client is None
             ws = await client.ws_connect("/api/voice", headers={"Authorization": "Bearer admin"})
-            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True)
+            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True, volumeControl=True)
             assert backend.can_serve_turn("echo")
             with pytest.raises(WSServerHandshakeError) as error:
                 await client.ws_connect("/api/voice?token=admin")
