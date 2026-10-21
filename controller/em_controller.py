@@ -1625,6 +1625,9 @@ _OUTCOME_ANIM = {
     # declined, here there is no pipeline — so the cue says so in the colour
     # the device already uses for a missing link. See em_scenes.no_ha_anim.
     "no_ha":         "no_ha_anim",
+    # HA chose to say nothing ("never mind"). Without a cue the ring went
+    # from thinking to dark, which read as cut off. See em_scenes.done_anim.
+    "silent_reply":  "done_anim",
 }
 
 # How long the listening ring is held before the no_ha cue replaces it. The
