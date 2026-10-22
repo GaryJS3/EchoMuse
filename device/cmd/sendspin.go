@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
+	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/firewall"
@@ -25,9 +26,10 @@ import (
 const sendspinStore = "/data/local/etc/echomuse/sendspin.json"
 
 var ss struct {
-	mu   sync.Mutex
-	c    *sendspin.Client
-	name string
+	mu    sync.Mutex
+	c     *sendspin.Client
+	name  string
+	proxy bool // the BLE proxy is on, so the player asks for headroom
 }
 
 func sendspinPlayer() *sendspin.Client {
@@ -56,6 +58,24 @@ func sendspinVolumeChanged(level int) {
 	if c := sendspinPlayer(); c != nil {
 		c.SetVolume(levelToPct(level))
 	}
+}
+
+// sendspinProxy follows the BLE proxy switch: while it is on, the player
+// declares the buffer a full scan burst needs (bluetooth.MusicHeadroom).
+func sendspinProxy(on bool) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.proxy = on
+	if ss.c != nil {
+		ss.c.SetMinBuffer(sendspinBuffer(on))
+	}
+}
+
+func sendspinBuffer(proxy bool) time.Duration {
+	if proxy {
+		return bluetooth.MusicHeadroom
+	}
+	return 0
 }
 
 // sendspinLinkDown stops the player when the controller link goes: EchoMuse
@@ -119,6 +139,7 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			// Before Start: a server can connect and command the volume at once.
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
+			c.SetMinBuffer(sendspinBuffer(ss.proxy))
 			// Open before Start advertises: Music Assistant dials when the
 			// record appears and may not retry a timeout. Logged, not
 			// fatal: FireOS has no filter to open.

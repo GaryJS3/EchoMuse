@@ -986,19 +986,37 @@ Why this shape: Bermuda (source, 2026-07) re-decides areas every 1.05s,
 refuses adverts older than 10s for an area contest and calls a device away
 after 30s, and even a continuous scan gave nearby devices a fresh advert in
 only 35-77% of its cycles. A voice turn's few seconds fit that; music does
-not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`,
-2026-09-27): 2s of scan every 7s, and none while less than 2.5s of music is
-buffered. The 7s cycle sits inside Bermuda's 10s area age for any device that
-advertises within the 2s burst. Scanning straight through music was the
-earlier rule and it failed: on VVV with Music Assistant, 23 RTT excursions
-over 250ms in 2.7 min (worst 2.1s) and 15+ audible dropouts, none with the
-proxy off. Music Assistant hands an HA media player a flow stream at 1.03x
-real time after a 3s burst, so the buffer never holds more than ~5s and cannot
-ride out a 2s stall. **Known gap:** the controller paces music from a clock
-estimate, not from the device's buffer, so after a real dropout the buffer
-stays low for the rest of that stream and the 2.5s floor keeps the scan off
-until it ends. The fix is a device-reported buffer level. A controller-scoring
-device's always-on stream does not count as a turn. Remaining idle loss
+not (hours), so music gets BURSTS instead of a yield (`bluetooth.MusicDuty`). Scanning
+straight through music was the earlier rule and it failed: on VVV with Music
+Assistant, 23 RTT excursions over 250ms in 2.7 min (worst 2.1s) and 15+
+audible dropouts, none with the proxy off.
+
+**Bursts are sized from the buffer, never the clock (#1004, 2026-10-22).**
+The first duty was 2s of scan every 7s, none below 2.5s buffered, and on
+Sendspin it never ran: Music Assistant streams a LIVE source (Spotify,
+radio, plugin sources) at exactly the player's declared `min_buffer_ms`,
+which was 2000 — 1862ms measured against aiosendspin 9.1.1 — while library
+tracks get up to 30s (`_PRODUCER_BUFFER_LIMIT_US`). How much a source buffers
+is the source's choice, so: a burst starts once 5s have passed and the lead
+covers the reserve plus 0.5s, and ends after 2s or the moment the lead falls
+to the reserve. The reserve (start 1.5s, 1–3s) is LEARNED from the lowest
+lead between a burst's start and the buffer's recovery: under 750ms raises
+it by the shortfall, a clean burst lowers it 100ms. A link still short at the
+3s cap backs the bursts off fourfold to 5 min, because each probe there can
+cost a dropout: the music wins, and the lost presence is counted. A lead that
+falls faster than real time is a flush or seek and teaches nothing. The HA
+music plane runs ~5s ahead (a flow stream at 1.03x) and, paced from a clock
+estimate, stays low after a real dropout; it now gets short bursts there
+rather than none for the rest of the stream. While the
+proxy is on, the Sendspin player declares `bluetooth.MusicHeadroom` (4s) and
+gets 3812ms on a live source; the cost is that a group containing that Echo
+starts and responds ~2s later. Stats carry `ble.music` (bursts, scanMs, cut,
+nearMisses, lowMarginMs, reserveMs, starved, starvedMs), and the log says
+`[ble] no scan for 8s of music` with the lead and what a burst needed — that
+is the line to read when someone reports Bermuda going quiet during music.
+The tests simulate a link that stalls for the whole burst plus a tail, and
+assert both goals: never dry, and no gap past 8s (Bermuda's AREA_MAX_AD_AGE
+is 10s). A controller-scoring device's always-on stream does not count as a turn. Remaining idle loss
 (pings, keepalives) is for TCP tolerance to absorb, not the scanner.
 
 **The mechanism was our own traffic on the liveness channel.**

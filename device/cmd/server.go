@@ -353,6 +353,7 @@ func main() {
 		t := time.NewTicker(100 * time.Millisecond)
 		defer t.Stop()
 		duty := bluetooth.NewMusicDuty()
+		bleScanner.SetMusicDuty(duty)
 		for now := range t.C {
 			// Synced music (Sendspin) is music too: it streams for hours
 			// and has its own buffer, so it gets the same bursts.
@@ -1537,6 +1538,7 @@ func applyBleConfig(scanner *bluetooth.Scanner, bridge *bluetooth.Bridge) {
 	snap := config.Get().Snapshot()
 	proxy := snap.BleProxyEnabled != nil && *snap.BleProxyEnabled
 	scanner.SetEnabled(proxy)
+	sendspinProxy(scanner.Enabled())
 	// Connections live inside the scan session, so they need the proxy on.
 	bridge.SetEnabled(proxy && snap.BleProxyConnections != nil && *snap.BleProxyConnections)
 }

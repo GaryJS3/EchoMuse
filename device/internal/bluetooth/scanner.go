@@ -54,6 +54,8 @@ type Stats struct {
 	YieldedMs   uint64 `json:"yieldedMs"`
 	Restarts    uint64 `json:"restarts"`
 	BdAddr      string `json:"bdAddr,omitempty"`
+	// Music is the burst duty's account (MusicDuty), once one is attached.
+	Music *DutyStats `json:"music,omitempty"`
 }
 
 // BatchCallback receives batched advertisements for upstream delivery.
@@ -85,6 +87,7 @@ type Scanner struct {
 	hciErrors   atomic.Uint64
 	restarts    atomic.Uint64
 	scanning    atomic.Bool
+	duty        atomic.Pointer[MusicDuty]
 	yields      atomic.Uint64 // times the scan stopped for the link
 	yieldedMs   atomic.Uint64 // total time it spent stopped
 	bdAddrMu    sync.Mutex
@@ -156,6 +159,17 @@ func (s *Scanner) Yield(yield bool) {
 	s.poke()
 }
 
+// Enabled reports whether the scanner is on: asked for, and the board has a
+// device to scan with.
+func (s *Scanner) Enabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled
+}
+
+// SetMusicDuty attaches the duty whose account Stats reports.
+func (s *Scanner) SetMusicDuty(d *MusicDuty) { s.duty.Store(d) }
+
 // batchKey coalesces identical broadcasts: same address AND same payload
 // collapse to one entry (latest RSSI wins). Distinct payloads from the same
 // address (e.g. ADV_IND vs SCAN_RSP) keep separate entries, so no advertised
@@ -212,6 +226,11 @@ func (s *Scanner) Stats() Stats {
 	s.bdAddrMu.Lock()
 	bdAddr := s.bdAddr
 	s.bdAddrMu.Unlock()
+	var music *DutyStats
+	if d := s.duty.Load(); d != nil {
+		st := d.Stats()
+		music = &st
+	}
 	return Stats{
 		Scanning:    s.scanning.Load(),
 		AdvertsSeen: s.advertsSeen.Load(),
@@ -222,6 +241,7 @@ func (s *Scanner) Stats() Stats {
 		YieldedMs:   s.yieldedMs.Load(),
 		Restarts:    s.restarts.Load(),
 		BdAddr:      bdAddr,
+		Music:       music,
 	}
 }
 
