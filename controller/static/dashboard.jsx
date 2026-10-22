@@ -7509,6 +7509,40 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     }
   }
 
+  // Sends `bytes` to /api/provision/upload_chunk in pieces under nginx's 1MB
+  // default body limit and returns the upload's id for the build POST (#800).
+  // A proxy in front of Home Assistant refused the image in one request
+  // (#769, #1001), with a 413 the controller never saw. `post(query, piece)`
+  // makes the request; a piece that fails on the network is retried, which
+  // the controller accepts because the bytes match what it already holds.
+  async function _sendInChunks(bytes, post) {
+    const CHUNK = 512 * 1024;
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+      b => b.toString(16).padStart(2, '0')).join('');
+    for (let offset = 0; offset < bytes.length; offset += CHUNK) {
+      const piece = bytes.subarray(offset, offset + CHUNK);
+      const query = `?id=${id}&offset=${offset}&total=${bytes.length}`;
+      let resp;
+      for (let attempt = 1; ; attempt++) {
+        try { resp = await post(query, piece); break; } catch (e) {
+          if (attempt >= 3) throw e;
+        }
+      }
+      if (resp.status === 413) {
+        throw new Error('Something in front of Home Assistant refused a 512 KB '
+          + 'request (HTTP 413). That is a reverse proxy\'s upload limit '
+          + '(nginx: client_max_body_size); raise it to 2m or more and retry. '
+          + 'Nothing has been written to the Echo.');
+      }
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); detail = j.message || j.error || detail; } catch {}
+        throw new Error(`The controller refused part of the image: ${detail}`);
+      }
+    }
+    return id;
+  }
+
   function _bootImageLength(bytes) {
     if (!bytes || bytes.length < 2048) return 0;
     if (new TextDecoder().decode(bytes.slice(0, 8)) !== 'ANDROID!') return 0;
@@ -7592,8 +7626,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     addLog(`Sending the escrowed image (${(reference.length/1024/1024).toFixed(1)} MB) `
          + `to the controller…`);
 
+    const post = (query, piece) => fetchWithDeadline(
+      ingressPath('/api/provision/upload_chunk' + query), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`,
+                   'Content-Type': 'application/octet-stream' },
+        body: piece,
+      }, 60000);
     const fd = new FormData();
-    fd.append('reference', new Blob([reference]), 'reference.img');
+    fd.append('reference_upload', await _sendInChunks(reference, post));
     // The controller checks this before it reads a byte of the image. It is
     // the integrity check on the escrow — the packer's round trip used to
     // provide one as a side effect of reproducing the boot header's SHA1, and
@@ -7603,7 +7644,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // reference's own kernel when asked, and an explicit part wins when the
     // operator picked a file by hand.
     if (initBlob) {
-      fd.append('init', initBlob, 'init');
+      fd.append('init_upload', await _sendInChunks(
+        new Uint8Array(await initBlob.arrayBuffer()), post));
     } else {
       fd.append('use_latest_init', '1');
     }

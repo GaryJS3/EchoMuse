@@ -2175,6 +2175,13 @@ throughout — so the rules below are all one rule seen from different angles.
   against real headers, and returning 0 (send everything) on anything it does
   not understand, because a size optimisation must never be why a build cannot
   happen.
+  **The image then crosses in 512 KB pieces** (#800, `em_chunked`,
+  `/api/provision/upload_chunk`): ~9MB was still over nginx's 1MB default, and
+  #769 and #1001 stopped at a 413 in front of Home Assistant. The build POST
+  names the upload (`reference_upload`, `init_upload`) and takes it once; the
+  pieces live in memory only, for the reason nothing else here is stored. Run
+  through a stock `nginx:alpine` on 2026-10-22: one 9MB POST 413, the same
+  bytes in 19 pieces built.
 - **The emOS flow must leave a `wpa_supplicant.conf` behind.** emOS starts the
   supplicant with `-c/data/misc/wifi/wpa_supplicant.conf` and the control
   socket comes from `ctrl_interface` INSIDE that file, so with no file there is

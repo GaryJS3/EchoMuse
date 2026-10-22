@@ -21,6 +21,7 @@ from pathlib import Path
 from aiohttp import web
 
 import em_auth as auth
+import em_chunked
 import em_db as db
 import em_emos_build
 import em_emos_ota
@@ -45,6 +46,7 @@ def register(app: web.Application) -> None:
     app.router.add_post("/api/provision/diagnostics",     _post_provision_diagnostics)
     app.router.add_get("/api/provision/emos_init",     _get_provision_emos_init)
     app.router.add_post("/api/provision/emos_image",   _post_provision_emos_image)
+    app.router.add_post("/api/provision/upload_chunk", _post_provision_upload_chunk)
 
 
 def _read_payload(name: str) -> str:
@@ -343,7 +345,71 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
 # appends to the same POST, so the next field to be added has to be read here
 # or fail CI.
 EMOS_IMAGE_FIELDS = ("reference", "init", "reference_md5", "version",
-                     "use_latest_init", "system_part")
+                     "use_latest_init", "system_part",
+                     "reference_upload", "init_upload")
+
+# Uploads sent in pieces by the wizard, claimed by the build that names them.
+_chunks = em_chunked.ChunkStore()
+
+
+@auth.require_admin
+async def _post_provision_upload_chunk(request: web.Request) -> web.Response:
+    """
+    POST /api/provision/upload_chunk?id=&offset=&total= (raw body)
+
+    One piece of an upload too large to cross a proxy in one request (#800).
+    """
+    q = request.query
+    try:
+        offset, total = int(q.get("offset", "")), int(q.get("total", ""))
+    except ValueError:
+        return em_http.error("bad_chunk", "offset and total must be integers", 400)
+    if (request.content_length or 0) > em_chunked.CHUNK_MAX:
+        return em_http.error("bad_chunk", f"a chunk may be at most "
+                             f"{em_chunked.CHUNK_MAX} bytes", 413)
+    data = await request.read()
+    try:
+        held = _chunks.put(q.get("id", ""), offset, total, data)
+    except em_chunked.ChunkError as e:
+        return em_http.error("bad_chunk", str(e), 400)
+    return web.json_response({"received": held})
+
+
+async def _read_emos_image_parts(request: web.Request) -> dict:
+    """The build POST's multipart fields, with named uploads claimed."""
+    reader = await request.multipart()
+    parts = {}
+    while True:
+        field = await reader.next()
+        if field is None:
+            break
+        if field.name not in EMOS_IMAGE_FIELDS:
+            # Loud, because the silent version of this cost every v2
+            # device its /system stamp.
+            log.warning(f"[api] emOS image: ignoring multipart field "
+                        f"{field.name!r}, which this endpoint does not read")
+            continue
+        if field.name in ("reference", "init"):
+            parts[field.name] = await field.read()
+        elif field.name in ("reference_upload", "init_upload"):
+            upload_id = (await field.read()).decode(errors="replace")[:64].strip()
+            # Absent or incomplete reads as not sent, which the checks below
+            # refuse by name.
+            data = _chunks.take(upload_id)
+            if data is not None:
+                parts[field.name.removesuffix("_upload")] = data
+        elif field.name == "system_part":
+            parts["system_part"] = (await field.read()).decode(
+                errors="replace")[:8]
+        elif field.name == "reference_md5":
+            parts["reference_md5"] = (await field.read()).decode(
+                errors="replace")[:64].strip().lower()
+        elif field.name == "version":
+            parts["version"] = (await field.read()).decode(errors="replace")[:64]
+        elif field.name == "use_latest_init":
+            parts["use_latest_init"] = (await field.read()).decode(
+                errors="replace")[:8].strip() not in ("", "0", "false")
+    return parts
 
 
 @auth.require_admin
@@ -373,39 +439,14 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
     An explicit `init` part still wins, for a hand-built binary.
     """
     try:
-        reader = await request.multipart()
-        parts = {}
-        while True:
-            field = await reader.next()
-            if field is None:
-                break
-            if field.name not in EMOS_IMAGE_FIELDS:
-                # Loud, because the silent version of this cost every v2
-                # device its /system stamp.
-                log.warning(f"[api] emOS image: ignoring multipart field "
-                            f"{field.name!r}, which this endpoint does not "
-                            f"read")
-                continue
-            if field.name in ("reference", "init"):
-                parts[field.name] = await field.read()
-            elif field.name == "system_part":
-                parts["system_part"] = (await field.read()).decode(
-                    errors="replace")[:8]
-            elif field.name == "reference_md5":
-                parts["reference_md5"] = (await field.read()).decode(
-                    errors="replace")[:64].strip().lower()
-            elif field.name == "version":
-                parts["version"] = (await field.read()).decode(errors="replace")[:64]
-            elif field.name == "use_latest_init":
-                parts["use_latest_init"] = (await field.read()).decode(
-                    errors="replace")[:8].strip() not in ("", "0", "false")
-
+        parts = await _read_emos_image_parts(request)
         reference = parts.get("reference")
         init_bin = parts.get("init")
         if not reference:
             return em_http.error("invalid_upload",
                           "Expected multipart field 'reference' — the boot "
-                          "image read off the device", 400)
+                          "image read off the device — or a complete "
+                          "'reference_upload'", 400)
         if not init_bin and not parts.get("use_latest_init"):
             return em_http.error("invalid_upload",
                           "Expected multipart field 'init' — the emOS init "
