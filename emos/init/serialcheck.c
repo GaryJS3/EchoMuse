@@ -1,4 +1,7 @@
-/* Prove init.c resolves the device serial, and refuses a corrupt one.
+/* Prove init.c resolves the device serial, and refuses a corrupt one; and that
+ * it tells radar from biscuit by idme's device type, which picks radar's WiFi
+ * bring-up (a wrong answer is a radar with no WiFi, or biscuit sent radar's
+ * ioctls).
  *
  * The whole fleet is keyed on the serial. Getting it wrong is the quiet kind of
  * wrong: a device that cannot resolve one registers as "unknown", and a second
@@ -131,6 +134,27 @@ int main(void)
                  "ro other=androidboot.serialno=" REAL, "");
     want_cmdline("a decoy before the real one",
                  "ro xandroidboot.serialno=DECOY androidboot.serialno=" REAL, REAL);
+
+    printf("\nidme_type_is() -- /proc/idme/device_type_id\n");
+    {
+        static const struct { const char *what, *raw; int radar; } t[] = {
+            /* Read off 035T on 2026-10-23: 12 characters and a NUL. */
+            { "radar, as the kernel gives it", "A7WXQPH584YP\0", 1 },
+            { "radar with a newline",          "A7WXQPH584YP\n", 1 },
+            { "biscuit",                       "A3S5BH2HU6VAYF\0", 0 },
+            { "radar's id with a suffix",      "A7WXQPH584YPX", 0 },
+            { "a prefix of radar's id",        "A7WXQPH584Y", 0 },
+            { "lower case",                    "a7wxqph584yp", 0 },
+            { "a leading NUL",                 "\0A7WXQPH584YP", 0 },
+            { "empty",                         "", 0 },
+        };
+        for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+            int got = idme_type_is(t[i].raw, RADAR_TYPE_ID);
+            printf("%s  %-44s -> %s\n", got == t[i].radar ? "ok  " : "FAIL",
+                   t[i].what, got ? "radar" : "not radar");
+            fails += got != t[i].radar;
+        }
+    }
 
     printf("\n%s\n", fails ? "FAILED" : "all ok");
     return fails ? 1 : 0;

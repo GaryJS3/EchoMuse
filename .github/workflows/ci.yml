@@ -122,6 +122,7 @@ jobs:
           node controller/tests/send_in_chunks.test.mjs
           node controller/tests/number_field.test.mjs
           node controller/tests/unlock_verdict.test.mjs
+          node controller/tests/echo_board.test.mjs
           node controller/tests/slot_choice.test.mjs
           node controller/tests/server_binary.test.mjs
           node controller/tests/fetch_deadline.test.mjs

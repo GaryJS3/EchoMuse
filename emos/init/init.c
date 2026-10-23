@@ -1295,6 +1295,37 @@ static const char *serialno(void)
     return buf;
 }
 
+/* Which board this is: Amazon's idme product id, the identity the firmware
+ * uses too (device/pkg/board), because the device tree reads MT8163 on every
+ * product. Matched exactly, with serial_copy's rules for idme's trailing NUL.
+ * Anything else is biscuit, which every emOS image before radar assumed. */
+#define RADAR_TYPE_ID "A7WXQPH584YP"
+
+static int idme_type_is(const char *raw, const char *id)
+{
+    char got[32];
+    return serial_copy(raw, got, sizeof got) && strcmp(got, id) == 0;
+}
+
+static int board_is_radar(void)
+{
+    static int known, radar;
+    if (known)
+        return radar;
+    known = 1;
+    char raw[64];
+    int fd = open("/proc/idme/device_type_id", O_RDONLY);
+    if (fd < 0)
+        return 0;
+    ssize_t n = read(fd, raw, sizeof raw - 1);
+    close(fd);
+    if (n <= 0)
+        return 0;
+    raw[n] = 0;
+    radar = idme_type_is(raw, RADAR_TYPE_ID);
+    return radar;
+}
+
 static void usbwr(const char *leaf, const char *val)
 {
     char p[256];
@@ -1683,6 +1714,18 @@ static int ifup(const char *name)
 #define WMT_FM_COMM       0x2
 #define WMT_HIF_ARG       ((WMT_FM_COMM << 4) | WMT_STP_BTIF_FULL)
 
+/* Radar's kernel also wants what Amazon's radar launcher sends, captured from
+ * it with an ioctl shim in #687 and confirmed there on two units: the chip id
+ * on /dev/wmtdetect first, then three calls on stpwmt after SET_STP_MODE.
+ * Without them SET_STP_MODE succeeds, the HIF stays unset and the wmtWifi
+ * write fails EIO. Names from MediaTek's wmt_dev.c and wmt_detect.c. */
+#define WMT_DETECT_IOC_MAGIC        'w'
+#define WMT_DETECT_SET_CHIP_ID      _IOW(WMT_DETECT_IOC_MAGIC, 1, int)
+#define WMT_IOCTL_LPBK_POWER_CTRL   _IOW(WMT_IOC_MAGIC, 7, int)
+#define WMT_IOCTL_SET_LAUNCHER_KILL _IOW(WMT_IOC_MAGIC, 13, int)
+#define WMT_IOCTL_COREDUMP_CTRL     _IOW(WMT_IOC_MAGIC, 24, int)
+#define RADAR_CHIP_ID               0x8163
+
 #define WMT_PATCH_MAX 8
 
 /* WMT_PATCH_INFO, wmt_lib.h. The layout is fixed by the driver's
@@ -1816,8 +1859,12 @@ static void wmt_daemon(int fd, const char *dir)
         }
         char cmd[64] = { 0 };
         ssize_t n = read(fd, cmd, sizeof cmd - 1);
-        if (n <= 0)
+        if (n <= 0) {
+            /* Readable with nothing to read: radar's stpwmt does this while
+             * the chip is between power cycles. Without the pause it spins. */
+            usleep(50000);
             continue;
+        }
         cmd[n] = '\0';
         if (!strncmp(cmd, "srh_patch", 9)) {
             int got = wmt_answer_patches(fd, dir);
@@ -1834,9 +1881,20 @@ static void wmt_daemon(int fd, const char *dir)
     }
 }
 
-/* Configure the HIF and fork the daemon. Returns 0 when the HIF took. */
-static int wmt_bringup(const char *patch_dir)
+/* Configure the HIF and fork the daemon. Returns 0 when the HIF took.
+ *
+ * On radar the daemon is forked FIRST, because the power-on its setup calls
+ * start asks for patches before they return, and nobody would answer. */
+static int wmt_bringup(const char *patch_dir, int radar)
 {
+    if (radar) {
+        int det = open("/dev/wmtdetect", O_RDWR);
+        int r = det < 0 ? -1 : ioctl(det, WMT_DETECT_SET_CHIP_ID, RADAR_CHIP_ID);
+        netlog("wmt: radar chip id 0x%x rc=%d errno=%d\n", RADAR_CHIP_ID, r,
+               r ? errno : 0);
+        if (det >= 0)
+            close(det);
+    }
     int fd = open("/dev/stpwmt", O_RDWR);
     if (fd < 0) {
         netlog("wmt: open /dev/stpwmt failed errno=%d\n", errno);
@@ -1845,16 +1903,32 @@ static int wmt_bringup(const char *patch_dir)
     if (ioctl(fd, WMT_IOCTL_SET_PATCH_NAME, patch_dir) < 0)
         netlog("wmt: SET_PATCH_NAME failed errno=%d\n", errno);
 
+    pid_t p = -1;
+    if (radar && (p = fork()) == 0) {
+        wmt_daemon(fd, patch_dir);
+        _exit(0);
+    }
+
     int r = ioctl(fd, WMT_IOCTL_SET_STP_MODE, WMT_HIF_ARG);
     netlog("wmt: SET_STP_MODE(0x%x) rc=%d errno=%d\n",
            WMT_HIF_ARG, r, r ? errno : 0);
     if (r < 0) {
+        if (p > 0)
+            kill(p, SIGKILL);
         close(fd);
         return -1;
     }
 
-    pid_t p = fork();
-    if (p == 0) {
+    if (radar) {
+        /* LPBK_POWER_CTRL takes a POINTER: given the value it runs the whole
+         * power-on and then fails the copy-out with EFAULT (#687). */
+        int zero = 0, one = 1;
+        int c = ioctl(fd, WMT_IOCTL_COREDUMP_CTRL, zero);
+        int k = ioctl(fd, WMT_IOCTL_SET_LAUNCHER_KILL, zero);
+        int l = ioctl(fd, WMT_IOCTL_LPBK_POWER_CTRL, &one);
+        netlog("wmt: radar setup coredump=%d launcher=%d power=%d errno=%d\n",
+               c, k, l, errno);
+    } else if ((p = fork()) == 0) {
         wmt_daemon(fd, patch_dir);
         _exit(0);
     }
@@ -2033,7 +2107,7 @@ static void net_main(void)
      * worth making until ours has run on hardware. */
     pid_t launcher = -1;
     if (vendor) {
-        if (wmt_bringup("/system/vendor/firmware/"))
+        if (wmt_bringup("/system/vendor/firmware/", board_is_radar()))
             netlog("wmt: bring-up failed, wlan0 will not appear\n");
     } else {
         launcher = spawn(launch);

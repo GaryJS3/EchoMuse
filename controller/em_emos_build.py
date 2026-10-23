@@ -433,6 +433,67 @@ def _stamp_cmdline_key(cmdline: bytes, key: str, value: str) -> bytes:
     return b" ".join(kept)
 
 
+# ── Radar: the kernel must not skip our ramdisk ─────────────────────────────
+#
+# Radar's LK appends `skip_initramfs` to the cmdline (it is not in the image's
+# own), and its A/B kernel then ignores the ramdisk and boots /system's init:
+# the emOS image flashes and FireOS comes up. Biscuit's LK does not append it.
+# The kernel cannot be told not to skip, so its copy of the parameter's name is
+# renamed and the word LK appends becomes an unknown argument, which init
+# ignores (it keys on getpid() == 1). Done to the user's own kernel, here, at
+# build time; nothing of Amazon's is carried.
+#
+# #687 pinned this to one kernel's SHA-256 (NS6572), which refused both kernels
+# on our unit (NS6575, two different builds in its two slots). It is held to
+# structure instead, each part of which fails closed: one gzip stream that
+# decodes to its end and is a Linux kernel, the name exactly once, and the
+# result the same length with every byte outside the stream unchanged. The
+# length cannot move because the decompressor reads the stream's size from
+# its last four bytes at a fixed address, so the recompressed stream is padded
+# back out through the gzip FNAME field, the one header extension the kernel's
+# gunzip skips (lib/decompress_inflate.c).
+SKIP_INITRAMFS = b"skip_initramfs\0"
+KEEP_INITRAMFS = b"keep_initramfs\0"
+# Boards whose bootloader appends skip_initramfs.
+SKIPS_INITRAMFS = {"radar"}
+
+
+def keep_initramfs(zimage: bytes) -> bytes:
+    """`zimage` with its kernel's skip_initramfs parameter renamed. A kernel
+    already renamed (an emOS image rebuilt) is returned unchanged."""
+    off = zimage.find(b"\x1f\x8b\x08")
+    if off < 0:
+        raise BuildError("the kernel has no gzip stream to patch")
+    d = zlib.decompressobj(31)
+    try:
+        raw = d.decompress(zimage[off:])
+    except zlib.error as e:
+        raise BuildError(f"the kernel's gzip stream does not decode: {e}")
+    if not d.eof or b"Linux version" not in raw:
+        raise BuildError("the kernel's gzip stream is not a whole Linux kernel")
+    skips, keeps = raw.count(SKIP_INITRAMFS), raw.count(KEEP_INITRAMFS)
+    if skips == 0 and keeps == 1:
+        return zimage
+    if skips != 1 or keeps != 0:
+        raise BuildError(
+            f"the kernel names skip_initramfs {skips} times (keep_initramfs "
+            f"{keeps}); expected once, so it is not a kernel this understands")
+    size = len(zimage) - off - len(d.unused_data)
+    new = gzip.compress(raw.replace(SKIP_INITRAMFS, KEEP_INITRAMFS),
+                        compresslevel=9, mtime=0)
+    slack = size - len(new)
+    if new[3] != 0 or not 1 <= slack <= 65536:
+        raise BuildError(
+            f"the patched kernel does not fit its original space ({len(new)} "
+            f"bytes against {size})")
+    stream = new[:3] + b"\x08" + new[4:10] + b"p" * (slack - 1) + b"\0" + new[10:]
+    out = zimage[:off] + stream + zimage[off + size:]
+    if (len(out) != len(zimage) or gzip.decompress(stream)
+            != raw.replace(SKIP_INITRAMFS, KEEP_INITRAMFS)):
+        raise BuildError("the patched kernel did not verify")
+    return out
+
+
 def pack(parts: dict, zimage: bytes, dtbs: bytes, ramdisk: bytes,
          extra_cmdline: str = RAMOOPS_CMDLINE, system_part: int = None) -> bytes:
     """Assemble a boot image from its parts, using the reference's own header."""
@@ -607,7 +668,7 @@ def init_binary_problems(init_binary: bytes, arch: str = ARCH_ARM64) -> list:
 
 def build_emos_image(reference: bytes, init_binary: bytes, version: str,
                      build_id: str = "", sbin: dict = None,
-                     system_part: int = None) -> dict:
+                     system_part: int = None, board: str = None) -> dict:
     """Build the image, refusing rather than warning at every gate.
 
     Returns the image and what went into it, so the wizard can show the user
@@ -619,6 +680,9 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
     system_a/system_b through TWRP's by-name map, which is the one place those
     names exist. Omitted, the image carries no stamp and emOS falls back to the
     partition it hardcoded before this existed, so older behaviour is kept.
+
+    `board` is the device's own identity as the wizard read it; a board in
+    SKIPS_INITRAMFS gets its kernel patched (keep_initramfs).
     """
     # Against the REFERENCE's kernel, not a constant: the same function builds
     # for both, and only the user's own image knows which.
@@ -679,7 +743,9 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
             + detail)
 
     ramdisk = build_ramdisk(init_binary, version, build_id, sbin)
-    image = pack(parts, parts["zimage"], parts["dtbs"], ramdisk,
+    zimage = (keep_initramfs(parts["zimage"]) if board in SKIPS_INITRAMFS
+              else parts["zimage"])
+    image = pack(parts, zimage, parts["dtbs"], ramdisk,
                  system_part=system_part)
     return dict(
         image=image,
@@ -689,6 +755,7 @@ def build_emos_image(reference: bytes, init_binary: bytes, version: str,
         reference_md5=hashlib.md5(reference).hexdigest(),
         reference_size=len(reference),
         zimage_size=len(parts["zimage"]),
+        kernel_patched=zimage != parts["zimage"],
         dtb_size=len(parts["dtbs"]),
         ramdisk_size=len(ramdisk),
         kernel_addr=parts["kaddr"],

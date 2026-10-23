@@ -345,7 +345,7 @@ async def _get_provision_emos_init(request: web.Request) -> web.Response:
 # appends to the same POST, so the next field to be added has to be read here
 # or fail CI.
 EMOS_IMAGE_FIELDS = ("reference", "init", "reference_md5", "version",
-                     "use_latest_init", "system_part",
+                     "use_latest_init", "system_part", "board",
                      "reference_upload", "init_upload")
 
 # Uploads sent in pieces by the wizard, claimed by the build that names them.
@@ -401,6 +401,11 @@ async def _read_emos_image_parts(request: web.Request) -> dict:
         elif field.name == "system_part":
             parts["system_part"] = (await field.read()).decode(
                 errors="replace")[:8]
+        elif field.name == "board":
+            # The device's own identity (_echoBoard); radar's kernel is patched
+            # to keep the ramdisk. Absent from a wizard older than radar.
+            parts["board"] = (await field.read()).decode(
+                errors="replace")[:32].strip()
         elif field.name == "reference_md5":
             parts["reference_md5"] = (await field.read()).decode(
                 errors="replace")[:64].strip().lower()
@@ -528,7 +533,7 @@ async def _post_provision_emos_image(request: web.Request) -> web.Response:
         # through this process while somebody provisions a new one.
         info = await loop.run_in_executor(
             None, em_emos_build.build_emos_image, reference, init_bin, version,
-            "", sbin, system_part)
+            "", sbin, system_part, parts.get("board") or None)
 
         log.info(f"[api] emOS image built"
                  # Not "(older wizard)", which is one of three ways to get

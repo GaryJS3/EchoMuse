@@ -130,7 +130,7 @@ def test_the_build_takes_what_the_chunks_carried(monkeypatch):
     monkeypatch.setattr(rp, "_chunks", ChunkStore())
     seen = {}
 
-    def fake_build(reference, init_bin, version, build_id, sbin, system_part):
+    def fake_build(reference, init_bin, version, build_id, sbin, system_part, board=None):
         seen.update(reference=reference, init=init_bin)
         return {"image": b"IMG", "md5": "m", "sha256": "s", "reference_md5": "r",
                 "size": 3, "reference_size": len(reference)}
