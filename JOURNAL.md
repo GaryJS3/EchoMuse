@@ -5321,3 +5321,100 @@ Also from the review: #697's fastboot timeouts were TLP's USB autosuspend on
 the host (now in the FAQ); #712's layout was fixed by reinstalling amonet v2
 as a zip from TWRP, a second Echo; #1001 is the third 413 at Build emOS (#800);
 #423's deadlock was fixed by #878 in 2.26.1 and nobody had told the reporter.
+
+## 2026-10-22 — the BLE scan under live Sendspin, a boot image in pieces, and an Echo that woke on its own reply
+
+**#1004: under a live Sendspin source the BLE scan never ran.** Music
+Assistant streams a live source (Spotify Connect, radio, a plugin) at exactly
+the player's `min_buffer_ms`, 1862 ms measured against aiosendspin 9.1.1,
+and `MusicDuty` needed 2.5 s of lead before it would scan. Library tracks get
+up to 30 s, which is why it never showed in testing. #1009 sizes scan bursts
+from the lead itself, learns the reserve it needs (1–3 s), backs off at the
+cap, and has Sendspin ask for 4 s while the BLE proxy is on, at the cost of
+about 2 s of group start latency. On C95 with live silence through
+aiosendspin: 3.77–3.79 s held, no underruns, adverts about 0.9/s. URL radio
+through MA buffers about 9 s (an Icecast burst), so it does not reproduce the
+report; a real Spotify Connect run is still untried.
+
+**#800: the wizard's boot image goes up in 512 KB pieces** (#1010), because a
+reverse proxy in front of the add-on refused the single 9 MB POST with a 413
+(stock `nginx:alpine` does the same). The pieces are held in memory, taken
+once, and expire after 600 s. #1011 pinned CI runners to `ubuntu-24.04`, with
+a test that every pin holds, after a runner image change broke main's build.
+
+**#1008: the second ALS part, read safely.** On the `G090LF096` batch the
+light sensor is a TSL2584 reached through IIO. Its `calibrated_lux` attribute
+frees a pointer that `strsep` has moved (read in the mt8163 kernel source), and
+its `get_baseline()` leaks and logs two lines per lit read unless the idme
+`alscal` value contains `ams_0_0`. The firmware reads it only then and reports
+`unsafe` otherwise. It has not been run on a 2584 unit.
+
+**#841: a 7 s hold to pair** (#1012), and only when the Echo is not on the
+encrypted link. On VVV, 5.7 s and 9.5 s holds went to HA as a long press with
+no pairing request, the longer one because VVV is on the encrypted link. #1002 (kill only the LED controller's PID in
+`start_server.sh`) passed a dry run on VVV with both `ps` layouts.
+
+**VVV woke on its own reply.** With the stock-sound chain at level 87 it
+scored 0.923 on its own "tell me a story" answer, over playback at the barge
+bar, with echo attenuation at 7–17 dB while the canceller re-adapted. Replayed
+digitally, ordinary replies score about zero on every chain; through a linear
+model of the driver correction even the near misses ("jars" 0.99 before the
+speaker) fall back to 0.02–0.05. So the self-wake is acoustic, residual echo
+and distortion, not a wake-like tone. A harness to count self-wakes on the
+Echo's own replies was written; the acoustic comparison of old and new chains
+is still owed.
+
+## 2026-10-23 — a command run on from the wake word, and what a barge-in hears in the first quarter second
+
+**A command run on from the wake word lost its first word, quiet or not.**
+A bench build saved each private-listening session as the gate saw it, with
+three seconds before it. Of nine one-breath commands on VVV with nothing
+playing, the full captures transcribe whole and the sessions do not on five:
+"time is it?", "joke.", "the office light.", "office blind.", "mind.". The
+scorer crosses a few frames into the command, and the session started at the
+crossing. Replayed through HA's faster-whisper, a start 240–280 ms earlier
+gave all nine whole without "Jarvis". #1014 starts the session 260 ms before
+the crossing; live, five of five came through.
+
+**Two things moved the start by a frame.** The mic is read in 160 ms
+batches, so frames reach the gate in pairs stamped microseconds apart, with the
+pairs 130–190 ms apart; a start chosen by time landed at 240 or 320 ms. It is
+now counted in frames from the crossing frame. And a crossing at the barge
+bar, which needs two frames, was dated from the second, against what
+docs/listening.md said; that session started a frame late and "stop" became
+"Nope".
+
+**Over a reply, the first 320 ms of a barge session was the reply.** "Oh,
+never mind" broke HA's `HassNevermind` match; the burst sat at the reply
+voice's pitch, not the speaker's. The controller's flush comes a round trip
+later, so the Echo now cuts its own reply at the crossing. That alone did not
+remove the burst, since the ALSA ring and a period are already committed. A
+hold-back that dropped reply frames at the start of the session fixed the
+paused case and ate one-breath barges ("it." for "what time is it"). Once the
+session started earlier and the Echo cut its own reply, the paused case
+replayed clean without it, so it was removed before merging.
+
+**The ordering fix exposed two faults** (#1007). The reply can end inside the
+250 ms claim hold, so the turn recorded `ok` instead of `barged`; it is now
+marked at the flush. And the turn loop started the interrupting turn before
+the claim resolved, which killed it in 199 ms; it now waits for the decision,
+bounded at 3 s.
+
+**Anchoring on the score's peak is no better than the crossing.** Re-scored
+with openwakeword (the controller and the Echo agree to four decimals), the
+score plateaus at 0.99–1.00 for two to four frames, so the peak wanders. On
+38 dumps the best start was 37/38 whole for either anchor, and the crossing
+tolerated more error. What still fails is a one-word command over a reply:
+"stop" over a story was wrong 2 times in 5, and whisper flips on the same
+audio with a 20 ms change at its start. Dropping the ALSA ring at the cut,
+so less reply lies under the command, is the next step and is not built.
+
+Also: HA's satellite ignores the conversation id we send
+(`assist_satellite/entity.py`) and keeps one chat per satellite until it has
+been idle five minutes, so an LLM agent sees every turn of a testing session as
+one conversation; a local model looped one tool call to HA's ten-iteration
+limit and answered "Unable to get response". Rebuilding
+the dev add-on from plain main stopped it at start: its database is at schema
+v32 from the unmerged stock-sound branch, and the check refused before writing
+anything. A radar (Echo gen 2, FireOS 6, 32-bit kernel) is on the bench with
+root adb.

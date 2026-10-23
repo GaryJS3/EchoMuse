@@ -86,10 +86,13 @@ Three consequences for reviewing a change:
 
 **LineageOS is probably the wrong target; postmarketOS already has an
 `amazon-biscuit` port** (its wiki and pmaports kernel config were corroborating
-sources for the ALS second-source diagnosis — see JOURNAL 2026-08-11). There is
-no Lineage port for a 2015 MT8163 on Android 5.1, and building one would mean
-keeping the same MediaTek vendor blobs — swapping Amazon's Android for
-somebody else's without removing the dependency.
+sources for the ALS second-source diagnosis — see JOURNAL 2026-08-11). A
+Lineage port for the Dot 2 does exist now — Kiosk Satellite ships its own
+"Kiosk Satellite Edition of LineageOS" (Android 7) for it, headless support
+from 2026-10-17 (seen 2026-10-19; not tried here). It does not change the
+answer: an Android build for a 2015 MT8163 runs on the same MediaTek vendor
+blobs, so it swaps Amazon's Android for somebody else's without removing the
+dependency.
 
 The posture is therefore **not to own the OS work, but not to prevent it**:
 keep `pkg/led`, `pkg/mic`, `pkg/speaker` and `pkg/buttons` honest as

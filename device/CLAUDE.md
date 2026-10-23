@@ -302,8 +302,8 @@ switch, unity at 255, 4-channel S32 capture, a different radio).
 Under `owwOnDevice=on`, against a controller announcing `listen_session`, with
 a scorer loaded, the device is `local`: the always-on wake stream still runs
 and feeds the scorer, and **nothing is sent**. A crossing opens a session in
-`internal/listen.Gate`; the audio captured after the crossing frame goes up as
-`0x07` frames tagged with the session until the controller's `listen_close`
+`internal/listen.Gate`; the audio from `listen.WakeLead` (260ms) before the
+crossing frame goes up as `0x07` frames tagged with the session until the controller's `listen_close`
 (end of speech) or a device-side limit. `listen.Resolve` is the whole state
 decision and `syncListenState` reports it as `listen_state` on every config
 push and every connect.
@@ -319,9 +319,19 @@ push and every connect.
   it no longer degrades an `oww_local_only` device to "off".
 - **One timestamp per frame, taken once**, handed to both `PushBytesAt` and
   `Gate.Push`. The scorer reports the CAPTURE time of the crossing frame, not
-  when inference finished (its queue holds up to 640ms), and the session
-  starts with every ringed frame captured after it. Two clocks would
+  when inference finished (its queue holds up to 640ms). Two clocks would
   duplicate or drop the first word.
+- **The session starts `WakeLead` (260ms) before the crossing, counted in
+  FRAMES back from the crossing frame** (#1014). The scorer crosses a few
+  frames into a command run on from the wake word, so starting at the
+  crossing cut its first word on 5 of 9 VVV captures ("time is it?"). It is
+  counted in frames because the mic is read in 160ms batches: two frames
+  carry near-equal stamps and batches land 130-190ms apart, so a start chosen
+  by time moved by a frame. The window that works is about two frames wide
+  (240-280ms quiet, 180-340ms barge, 38 dumps replayed through HA's whisper,
+  2026-10-23); anchoring on the score's peak was tried and is no better,
+  since the score plateaus for 2-4 frames. The part of the first frame before
+  the lead is silenced on a copy: the ring's buffer is shared.
 - **A crossing inside an open session is words, not a wake** — `Gate.Open`
   refuses and `onWakeCrossing` drops it.
 - **`mic_stop` does not stop local listening, and does not end sessions.**
@@ -335,7 +345,21 @@ push and every connect.
 - **The barge bar applies to music too** (`speakerPlaying`), mirroring the
   controller's wake-over-music rule, and at that bar the scorer needs **two
   consecutive frames** — em_barge.decide's rule, now on the device because a
-  private Echo sends the controller nothing to decide over.
+  private Echo sends the controller nothing to decide over. **Such a crossing
+  is dated from the FIRST of the two frames**; dated from the second, the
+  barge session started a frame late and "stop" reached HA as "Nope".
+- **The Echo cuts its own reply at a barge crossing** (`listen.CutReplyOnBarge`,
+  #1014), instead of waiting a round trip for the controller's `speaker_flush`
+  (1.3s late on a stalled link). Only while the reply is still to be heard
+  (`replyStillHeard`): the barge flag stays true for `ScoreSpan` after a reply
+  ends, and a cut there flushed a silent speaker. Up to ~210ms (the ALSA ring
+  plus a period) still plays after the cut and is sent with the session.
+  **Dropping that reply audio from the session was built and removed**: it
+  fixed "Oh, never mind" after a pause, but once the session started earlier
+  and the Echo cut its own reply the pause case was clean without it, and it
+  ate a command run on from the wake word ("it." for "what time is it").
+  Dropping the ALSA ring on the cut is the untried next step; it needs a
+  GoTinyAlsa change and would click ducked music.
 - **Older controllers keep the old behaviour.** Without `listen_session` the
   state is `stream` in every mode, because an old controller only acts on a
   device wake when stream frames are arriving.
