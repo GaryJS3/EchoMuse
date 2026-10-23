@@ -745,6 +745,22 @@ func (p *PcmSpeaker) VoiceAudible(hold time.Duration) bool {
 	return p.voice.playedWithin(time.Now(), hold)
 }
 
+// voicePlayout is how long a voice period is heard for after it is taken:
+// the ALSA ring ahead of it, then the period itself.
+const voicePlayout = time.Duration(alsaBufferFrames+periodSize) * time.Second / 48000
+
+// VoiceSoundingUntil is when the last voice period taken finishes coming out
+// of the speaker; zero if none has played. After a Flush nothing more is
+// taken, so it says when the reply really stopped, which VoiceAudible (still
+// true while a flushed stream waits for its EOS) cannot.
+func (p *PcmSpeaker) VoiceSoundingUntil() time.Time {
+	last := p.voice.lastTakeNs.Load()
+	if last == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, last).Add(voicePlayout)
+}
+
 // VoiceArriving reports whether a voice reply is still arriving on the wire —
 // the part of playback that needs the link, as against playing out of the
 // buffer. The BLE scanner yields for it (bluetooth.Scanner.Yield). Music

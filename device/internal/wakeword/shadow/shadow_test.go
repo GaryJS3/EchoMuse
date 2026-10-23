@@ -643,6 +643,32 @@ func TestCrossingReportsCaptureTime(t *testing.T) {
 	}
 }
 
+// TestBargeCrossingIsDatedFromItsFirstFrame: at the barge bar a crossing
+// needs two frames, and the private session starts from its date, so dating
+// it from the second started the session a frame into the command.
+func TestBargeCrossingIsDatedFromItsFirstFrame(t *testing.T) {
+	got := make(chan time.Time, 1)
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(_, _ float32, at time.Time) { got <- at })
+	defer s.Close()
+	s.SetBargeThreshold(0.25, func() bool { return true })
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	inf.set(0.3, 0)
+	first := time.Now().Add(-500 * time.Millisecond)
+	b := make([]byte, wakeword.ChunkSamples*2)
+	s.PushBytesAt(b, first)
+	s.PushBytesAt(b, first.Add(80*time.Millisecond))
+	select {
+	case at := <-got:
+		if !at.Equal(first) {
+			t.Fatalf("barge crossing dated %v, want the first frame's %v", at.Sub(first), time.Duration(0))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no crossing")
+	}
+}
+
 // TestBargeWindowReportsThePeakAtTheBargeBar: the private path's replacement
 // for the controller barge watcher's "peak=" line.
 func TestBargeWindowReportsThePeakAtTheBargeBar(t *testing.T) {

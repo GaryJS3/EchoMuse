@@ -1356,6 +1356,12 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		sc.Info(), threshold, bargeNote, actsOnCrossings(mode))
 }
 
+// replyStillHeard reports whether a voice reply is queued, arriving or still
+// coming out of the speaker.
+func replyStillHeard(spk *speaker.PcmSpeaker) bool {
+	return spk.VoiceAudible(0) || time.Now().Before(spk.VoiceSoundingUntil())
+}
+
 // speakerPlaying is when the wake bar drops to bargeInThreshold: a response,
 // an alarm (both on the voice plane) or music. The controller has always
 // scored wake-over-music at the barge bar when barge-in is enabled, and this
@@ -1502,11 +1508,17 @@ func onWakeCrossing(cc *client.ControlClient, dc *client.DataClient,
 		}
 	}
 	// Duck with the ring, not a round trip later. Music only: a reply being
-	// barged over is cut by the controller's speaker_flush, not ducked.
+	// barged over is cut, not ducked.
 	if spk != nil && localDuck != nil && spk.MusicAudible(0) {
 		localDuck.Start(config.Get().DuckDb)
 	}
 	barge := spk != nil && spk.VoiceAudible(wakeword.ScoreSpan)
+	// Cut only a reply still to be heard: queued, arriving or playing out.
+	// barge stays true for ScoreSpan after the reply ends (the model's window
+	// still holds it), and a cut there flushed a silent speaker.
+	if listen.CutReplyOnBarge(spk, barge && replyStillHeard(spk), config.Get().Snapshot().BargeInEnabled) {
+		log.Printf("[listen] barge %.3f over the reply — cut here", score)
+	}
 	level, peak, ok := dc.WakeLevel(at)
 	var lv *client.WakeLevel
 	if ok {

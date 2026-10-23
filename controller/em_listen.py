@@ -183,8 +183,8 @@ def tail_discard(is_wakeword: bool, on_session: bool, frames: int) -> int:
     """Frames to drop from the start of a turn as the wake word's tail.
 
     A stream the controller scored still holds the end of the word. A session
-    does not: the Echo starts it after the frame that crossed, so dropping
-    more removed the first word of a command run on from the wake word.
+    is trimmed on the Echo (listen.WakeLead), so dropping more removed the
+    first word of a command run on from the wake word.
     """
     return frames if is_wakeword and not on_session else 0
 
