@@ -80,8 +80,9 @@ message (`device/internal/client/control.go`):
 ```
 
 `base_os`, `board` and the two `kernel_*` fields describe the boot and are
-informational: the controller stores and displays them, and gates Android-only
-payloads on `base_os`. The kernel pair is omitted if `uname` fails. A device
+informational: the controller stores and displays them, gates Android-only
+payloads on `base_os`, and names the Echo's model in Home Assistant from
+`board` (`em_boards`; absent or `unknown` shows the Dot 2's). The kernel pair is omitted if `uname` fails. A device
 for a new board should send all of them.
 
 `boot_id`, `boot_reason` and `emmc` are boot-time health, each omitted when it

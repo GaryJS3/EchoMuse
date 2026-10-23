@@ -78,6 +78,8 @@ import numpy as np
 from zeroconf.asyncio import AsyncZeroconf
 from zeroconf import ServiceInfo
 
+import em_boards
+import em_state
 import em_db as db
 import em_events
 import em_hostip
@@ -231,8 +233,10 @@ MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 from version import VERSION as _CONTROLLER_VERSION
 # HA's ESPHome integration displays the segment after the dot in
 # project_name as the device Model (overriding DeviceInfo's model field),
-# so carry the hardware model there — not the device label.
-ESPHOME_DEVICE_MODEL = "Echo Dot Gen 2 (biscuit)"
+# so carry the hardware model there — not the device label. Per device, from
+# the board its firmware reported (em_boards).
+def device_model(device_id: str) -> str:
+    return em_boards.model(em_state.boards.get(device_id))
 
 ESPHOME_PROJECT_VERSION = os.environ.get(
     "ESPHOME_PROJECT_VERSION", _CONTROLLER_VERSION
@@ -603,12 +607,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 friendly_name=f"{self.label} Voice Assistant",
                 mac_address=self.mac_address,
                 manufacturer="EchoMuse",
-                model=ESPHOME_DEVICE_MODEL,
+                model=device_model(self.device_id),
                 # CRITICAL: dot notation required — HA's manager.py does
                 # project_name.split(".") unconditionally. No dot → IndexError
                 # → device silently never appears in Devices & Services.
                 # (session handoff finding #1)
-                project_name=f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+                project_name=f"EchoMuse.{device_model(self.device_id)}",
                 project_version=ESPHOME_PROJECT_VERSION,
                 voice_assistant_feature_flags=self._voice_assistant_flags(),
             )
@@ -3627,7 +3631,7 @@ def _make_device_mdns_info(device_id: str, label: str, port: int,
             # required to agree, and nothing reports it if they stop.
             "mac": mac.replace(":", "").lower(),
             "network": "ethwifi",
-            "project_name": f"EchoMuse.{ESPHOME_DEVICE_MODEL}",
+            "project_name": f"EchoMuse.{device_model(device_id)}",
             "project_version": ESPHOME_PROJECT_VERSION,
         },
         server=f"{svc_name}.local.",

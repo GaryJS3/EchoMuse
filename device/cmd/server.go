@@ -543,6 +543,9 @@ func main() {
 			for _, p := range layout.Problems {
 				controlClient.SendLog("warn", "[board] "+p)
 			}
+			for _, p := range pcmSpeaker.Problems() {
+				controlClient.SendLog("warn", "[board] "+p)
+			}
 		})
 		if pulseCancel != nil {
 			pulseCancel()

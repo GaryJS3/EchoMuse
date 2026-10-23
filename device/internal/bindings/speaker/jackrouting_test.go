@@ -20,10 +20,11 @@ func TestJackRoutingMutesInternalDriverWhenSomethingIsPluggedIn(t *testing.T) {
 	}
 }
 
+// Last, so nothing is switched under a playing speaker.
 func TestJackRoutingEnablesInternalDriverWhenNothingIsPluggedIn(t *testing.T) {
 	got := jackRouting(false)
-	if got[0].Ctl != ctlSpeakerAmp || got[0].Args[0] != "On" {
-		t.Errorf("internal amp must be On with the jack empty, got ctl %s = %v", got[0].Ctl, got[0].Args)
+	if last := got[len(got)-1]; last.Ctl != ctlSpeakerAmp || last.Args[0] != "On" {
+		t.Errorf("internal amp must come On last with the jack empty, got ctl %s = %v", last.Ctl, last.Args)
 	}
 }
 

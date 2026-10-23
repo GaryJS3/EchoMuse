@@ -72,7 +72,11 @@ var silencePeriod = make([]byte, periodBytes)
 type PcmSpeaker struct {
 	// pcm is the playback device, found by name (pkg/board) in Init, and
 	// statusFile its substream's status in procfs.
-	pcm        board.PCMAddr
+	pcm board.PCMAddr
+	// out is the board's own playback needs, and problems what of them
+	// could not be met, reported to the controller.
+	out        output
+	problems   []string
 	statusFile string
 	session    *tinyalsa.AudioSession
 	stopCh     chan struct{}
@@ -261,7 +265,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		deadCh:        make(chan struct{}),
 		echoTap:       echoTap,
 		levelTap:      levelTap,
-		chain:         outchain.New(48000),
+		chain:         outchain.NewFor(48000, guardBand(board.CurrentLayout().Speaker.BassGuard)),
 		chainParams:   outchain.DefaultParams(),
 		chainBuf:      make([]byte, periodBytes),
 		srcBuf:        make([]byte, periodBytes),
@@ -281,12 +285,21 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 }
 
 func (p *PcmSpeaker) Init() error {
-	pb := board.CurrentLayout().Playback
+	layout := board.CurrentLayout()
+	pb := layout.Playback
 	if pb == nil {
 		return errors.New("speaker: playback PCM not found on this board")
 	}
 	p.pcm = *pb
 	p.statusFile = statusPath(pb.Card, pb.Device)
+	out, err := loadOutput(layout.Speaker, os.ReadFile)
+	if err != nil {
+		log.Printf("[speaker] %v", err)
+		p.problems = append(p.problems, err.Error())
+	}
+	p.out = out
+	// Silent in hardware before a stock service lets go of the codec.
+	p.out.holdMute()
 	// Startup order matters for the audible click (2026-07-10): the amp
 	// must come up onto a DAC that is already clocking silence, and the
 	// unmute must come last. The old order (amp on → unmute → open PCM)
@@ -307,6 +320,7 @@ func (p *PcmSpeaker) Init() error {
 	// down, which presents as a clean "voice stream complete, underruns=0"
 	// into silence. See the codec package.
 	codec.EnsureRoutes()
+	p.applyJackWrites(p.out.setup())
 	mixer.Set(mixer.PlaybackVolume, "0") // mute before touching amp or stream
 
 	device := tinyalsa.NewDevice(p.pcm.Card, p.pcm.Device, pcm.Config{
@@ -328,14 +342,46 @@ func (p *PcmSpeaker) Init() error {
 
 	go p.silenceLoop()
 
+	p.waitRunning(pcmRunTimeout)
 	time.Sleep(100 * time.Millisecond)        // silence reaches the DAC (~2 periods)
 	mixer.Set(mixer.SpeakerAmp, "On")         // enable amp onto a clocked, silent DAC
 	time.Sleep(50 * time.Millisecond)         // let amp settle
 	mixer.Set(mixer.PlaybackVolume, dacUnity) // unmute: volume is applied in software
+	// Last, so the DAC's step happens behind it: the quietest order of the
+	// ones measured on radar's mics (2026-10-23).
+	if err := p.out.releaseMute(); err != nil {
+		p.problems = append(p.problems, err.Error())
+	}
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
 }
+
+// pcmRunTimeout bounds the wait for the stream to start. Radar's codec
+// driver ramps its own gain for ~1.3s before the stream runs (measured on
+// 035T, 2026-10-23); biscuit's starts at once.
+const pcmRunTimeout = 3 * time.Second
+
+// waitRunning blocks until the playback stream is running, or the timeout
+// expires, and logs which. Releasing a hardware mute before then is undone
+// by the driver as the stream starts.
+func (p *PcmSpeaker) waitRunning(timeout time.Duration) {
+	start := time.Now()
+	for time.Since(start) < timeout {
+		if b, err := os.ReadFile(p.statusFile); err == nil {
+			if _, ok := pcmDelay(string(b)); ok {
+				log.Printf("[speaker] stream running after %dms", time.Since(start).Milliseconds())
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	log.Printf("[speaker] stream not running after %s; carrying on", timeout)
+}
+
+// Problems is what the board's playback needs that could not be met, for
+// the controller.
+func (p *PcmSpeaker) Problems() []string { return p.problems }
 
 // pcmFreeTimeout bounds the wait for another process to release the speaker.
 //
@@ -405,7 +451,7 @@ func (p *PcmSpeaker) SetJackRouting(inserted bool) {
 	guardBypassed := inserted && p.chainParams.GuardEnabled
 	p.jackMu.Unlock()
 
-	p.applyJackWrites(jackRouting(inserted))
+	p.applyJackWrites(p.out.jack(inserted))
 	log.Printf("[speaker] jack routing applied (%s)",
 		map[bool]string{true: "external", false: "internal"}[inserted])
 	if guardBypassed {
@@ -840,6 +886,7 @@ func (p *PcmSpeaker) SetResponseGainDB(db float64) { p.response.setDB(db) }
 // amp-off after every server exit as a belt-and-braces for paths where
 // this never runs (SIGKILL, panic).
 func (p *PcmSpeaker) Close() {
+	p.out.holdMute()
 	mixer.Set(mixer.PlaybackVolume, "0") // mute
 	mixer.Set(mixer.SpeakerAmp, "Off")   // amp off
 	close(p.stopCh)

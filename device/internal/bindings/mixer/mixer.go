@@ -17,6 +17,7 @@ package mixer
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 )
 
@@ -30,7 +31,8 @@ const (
 )
 
 // Backend is the device implementation. Values are strings as tinymix prints
-// and accepts them: enum names, "On"/"Off" for switches, decimal integers.
+// and accepts them: enum names, "On"/"Off" for switches, decimal integers,
+// and one decimal 0-255 per byte of a byte control.
 type Backend interface {
 	Set(name string, values []string) error
 	Get(name string) (string, error)
@@ -113,4 +115,21 @@ func spread(name string, values []string, n int) ([]string, error) {
 		return nil, fmt.Errorf("mixer: %q takes %d values, got %d", name, n, len(values))
 	}
 	return values, nil
+}
+
+// byteValues parses a byte control's values. Exactly one per byte, never
+// spread: one byte repeated across a filter is not a filter.
+func byteValues(name string, values []string, n int) ([]byte, error) {
+	if n < 1 || len(values) != n {
+		return nil, fmt.Errorf("mixer: %q takes %d bytes, got %d", name, n, len(values))
+	}
+	out := make([]byte, n)
+	for i, s := range values {
+		v, err := strconv.ParseUint(s, 10, 8)
+		if err != nil {
+			return nil, fmt.Errorf("mixer: %q: bad byte %q", name, s)
+		}
+		out[i] = byte(v)
+	}
+	return out, nil
 }

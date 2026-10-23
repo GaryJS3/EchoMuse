@@ -82,8 +82,10 @@ type mixerWrite struct {
 //     stock value whose effect is unknown is how you ship a change that cannot
 //     be defended when it turns out to do something else.
 //
-// The order within a position does not matter: these are independent controls
-// on a codec that is already clocking, not a sequence.
+// The amp goes off first on insert and on last on removal, so nothing is
+// switched under a playing speaker. On biscuit the other controls are
+// independent and the order is moot; on radar the filter swap goes between
+// (output.jack).
 func jackRouting(inserted bool) []mixerWrite {
 	if inserted {
 		// Something is in the jack, so the internal driver must be silent —
@@ -97,9 +99,9 @@ func jackRouting(inserted bool) []mixerWrite {
 	}
 	// Nothing in the jack: the internal driver is the only output there is.
 	return []mixerWrite{
-		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
 		{Ctl: ctlHPDriverGain, Args: []string{hpGainInternal, hpGainInternal}},
 		{Ctl: ctlDacMux, Args: []string{dacMuxInternal}},
+		{Ctl: ctlSpeakerAmp, Args: []string{"On"}},
 	}
 }
 

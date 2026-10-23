@@ -42,6 +42,48 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	}
 }
 
+// testdata/radar-fireos6 is 035T (FireOS 6, NS6575) on 2026-10-23, read the
+// same way. Its PCMs and i2c clients are biscuit's, so are its numbers, but
+// radar has no fallbacks: everything must be found by name.
+const radarFOS6 = "testdata/radar-fireos6"
+
+func TestRadarResolvesByNameOnly(t *testing.T) {
+	b := Detect(radarFOS6)
+	if b != Radar {
+		t.Fatalf("fixture detected as %v", IDOf(b))
+	}
+	l := Resolve(radarFOS6, b)
+	if l.DotKeys != "/dev/input/event1" || l.VolumeKeys != "/dev/input/event2" {
+		t.Errorf("keys: dot %q volume %q", l.DotKeys, l.VolumeKeys)
+	}
+	if want := filepath.Join(radarFOS6, "/sys/bus/i2c/devices/0-003f"); l.LEDRing != want {
+		t.Errorf("led ring %q, want %q", l.LEDRing, want)
+	}
+	if l.Capture == nil || *l.Capture != (PCMAddr{0, 24}) || l.Playback == nil || *l.Playback != (PCMAddr{0, 23}) {
+		t.Errorf("capture %+v playback %+v", l.Capture, l.Playback)
+	}
+	if len(l.Problems) != 0 {
+		t.Errorf("parts not found by name on the fixture: %v", l.Problems)
+	}
+	// gpio444 is an audio clock on the Dot 3; no board states a pin it has
+	// not measured.
+	if l.MuteLEDGPIO != "" {
+		t.Errorf("mute LED gpio %q on a board that never measured one", l.MuteLEDGPIO)
+	}
+	if l.Speaker.AmpMute == "" || l.Speaker.Filter == nil {
+		t.Errorf("speaker %+v: radar is silent without its amp mute and filter", l.Speaker)
+	}
+}
+
+func TestEveryBoardStatesItsBassBand(t *testing.T) {
+	for _, b := range Known {
+		g := b.Hardware.Speaker.BassGuard
+		if g.CrossoverHz < 20 || g.CrossoverHz > 500 || g.ThresholdDb >= 0 {
+			t.Errorf("%s: bass band %+v", b.ID, g)
+		}
+	}
+}
+
 // The names decide, not the numbers: the same parts enumerated in another
 // order resolve to wherever they now are.
 func TestPartsAreFoundWhereverTheyEnumerate(t *testing.T) {

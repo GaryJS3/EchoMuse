@@ -2,13 +2,12 @@ package outchain
 
 import "math"
 
-// Bass guard constants, from em_mbc — stock's MBCL.cfg band 1 (#229). See
-// that module for why only band 1 exists and why the crossover is LR4.
+// Bass guard law, from stock's MBCL.cfg band 1 (#229); the same on every
+// board read so far. See em_mbc for why only band 1 exists and why the
+// crossover is LR4.
 const (
-	crossoverHz     = 115.0
-	bassRatio       = 20.0
-	bassThresholdDb = -50.0
-	bassReleaseMs   = 200.0
+	bassRatio     = 20.0
+	bassReleaseMs = 200.0
 
 	// releaseReferenceDb: a release time is the time to recover THIS many dB,
 	// so the setting means the same thing at 1dB or 12dB of reduction.
@@ -18,14 +17,24 @@ const (
 	eps       = 1e-9
 )
 
-// bassThresholdLin is bassThresholdDb as a sample magnitude.
-var bassThresholdLin = fullScale * math.Pow(10, bassThresholdDb/20)
+// GuardBand is what the guard protects on a board's driver: the band below
+// CrossoverHz, from ThresholdDb. Stock's MBCL.cfg band 1 for that driver.
+type GuardBand struct {
+	CrossoverHz float64
+	ThresholdDb float64
+}
+
+// DefaultGuardBand is biscuit's, and the controller's (em_mbc).
+var DefaultGuardBand = GuardBand{CrossoverHz: 115, ThresholdDb: -50}
 
 // bassGuard splits at 115Hz with a Linkwitz-Riley 4th-order pair and applies
 // a 20:1 law from -50dBFS to the low band only, floored at `floorDb`.
 type bassGuard struct {
 	enabled bool
 	floorDb float64
+
+	thresholdDb  float64
+	thresholdLin float64 // thresholdDb as a sample magnitude
 
 	lp, hp [2]biquad // LR4 = the Butterworth section applied twice
 	slew   float64   // dB per sample the gain may rise
@@ -35,11 +44,13 @@ type bassGuard struct {
 	maxReductionDb float64
 }
 
-func newBassGuard(fs float64) *bassGuard {
+func newBassGuard(fs float64, band GuardBand) *bassGuard {
 	g := &bassGuard{
-		slew: releaseReferenceDb / (math.Max(0.1, bassReleaseMs) / 1000) / fs,
+		thresholdDb:  band.ThresholdDb,
+		thresholdLin: fullScale * math.Pow(10, band.ThresholdDb/20),
+		slew:         releaseReferenceDb / (math.Max(0.1, bassReleaseMs) / 1000) / fs,
 	}
-	lo, hi := butter2(crossoverHz, fs, false), butter2(crossoverHz, fs, true)
+	lo, hi := butter2(band.CrossoverHz, fs, false), butter2(band.CrossoverHz, fs, true)
 	g.lp = [2]biquad{lo, lo}
 	g.hp = [2]biquad{hi, hi}
 	return g
@@ -55,12 +66,12 @@ func (g *bassGuard) step(x float64) float64 {
 		return low + high
 	}
 
-	// Below the threshold the target is unity, so the log is skipped: at
-	// -50dBFS that is quiet passages and the gaps between words.
+	// Below the threshold the target is unity, so the log is skipped: on
+	// biscuit's -50dBFS that is quiet passages and the gaps between words.
 	target := 0.0
-	if a := math.Abs(low); a > bassThresholdLin {
+	if a := math.Abs(low); a > g.thresholdLin {
 		levelDb := 20 * math.Log10(a/fullScale)
-		target = max(-(levelDb-bassThresholdDb)*(1-1/bassRatio), g.floorDb)
+		target = max(-(levelDb-g.thresholdDb)*(1-1/bassRatio), g.floorDb)
 	}
 
 	// Instant attack, slew-limited release.

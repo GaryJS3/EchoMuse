@@ -4,8 +4,8 @@ The firmware is one binary. At start-up it works out which board it is on,
 looks up where that board's parts are **by name**, and opens what it found.
 Adding a board means describing it in one file; the drivers stay as they are.
 
-Today only the Echo Dot 2nd gen (`biscuit`) is described. This page is for
-anyone trying the firmware on something else.
+Two boards are described: the Echo Dot 2nd gen (`biscuit`) and the Echo 2nd
+gen (`radar`). This page is for anyone trying the firmware on something else.
 
 Related reading: [`porting/README.md`](../porting/README.md) for the scripts
 that profile an unsupported Echo, and
@@ -45,6 +45,7 @@ protocol a board has to speak.
 | Ambient light sensor | i2c driver name, plus the attribute that reads lux | `/sys/bus/i2c/devices/*/name` |
 | Mute button LED | sysfs GPIO number | stated by the board |
 | Bluetooth controller | HCI device path | stated by the board |
+| Speaker | amp mute control, codec filter, bass band | stated by the board (`Speaker`) |
 
 The firmware prints the result at start-up, one `[board]` line per part.
 
@@ -127,9 +128,11 @@ them as the second board is added.
 - **Audio routes.** `internal/bindings/codec/routes.go` closes ten mixer
   switches by name, all of them the Dot 2's.
 - **Amplifier and volume.** The amp switch, the DAC's unity value (127) and
-  the click-free start-up order.
-- **Headphone jack.** The detect switch and the two controls written on
-  plug-in and removal.
+  the click-free start-up order. A board can add a hardware mute, a codec
+  filter and controls written once at start-up (`Speaker`); the order around
+  them is shared.
+- **Headphone jack.** The detect switch and the three controls written on
+  plug-in and removal. A board's codec filter is swapped with the plug.
 - **Start-up order.** Some boards need one PCM opened before another.
 - **Android services.** `stop mixer`, `stop media`, `stop ledcontroller` and
   `stop acebutton` are run as they are named on the Dot 2.
@@ -199,7 +202,10 @@ put the firmware on their own hardware and wrote down what they found:
 - **Echo Dot 3rd gen:** @shortgame11 (the first working port, and the
   findings about the amplifier, its clock and GPIO 444), @technotiger
   (profile and probe runs).
-- **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider.
+- **Echo 2nd gen:** @vithurshanselvarajah and @jcsnider (the port, emOS on
+  it, the 9-channel capture and the speaker bring-up), @sascha-hemi (the
+  jack's filter swap, and that the Dot 2's bass guard removed its bass),
+  @colin715 (test runs).
 - **Echo Show 5:** @imduffy15.
 
 ## Where the Dot 2's values came from
@@ -209,3 +215,31 @@ emOS with the FireOS 6 (32-bit) kernel and one on emOS with the FireOS 5
 (64-bit) kernel. All three report the same names at the same numbers. The
 first unit's output is the fixture at
 `device/pkg/board/testdata/biscuit-fireos5/`.
+
+## The Echo 2nd gen (`radar`)
+
+Read from one unit (035T, stock FireOS 6, build NS6575) on 2026-10-23, and
+checked against the port in #687. Every input device, PCM and i2c client is
+the Dot 2's, by name and by number, and so is the microphone layout: the
+same 9 channels, ch0 to ch5 clockwise around the ring, ch6 in the centre,
+ch7 and ch8 the playback loopback. The fixture is
+`device/pkg/board/testdata/radar-fireos6/`. What differs is the speaker:
+
+- **A hardware mute, `MFP Gpio Mute`.** The codec driver sets it at every
+  stream open and close and keeps it through an underrun, and the speaker is
+  silent until it is released. The firmware releases it once the stream runs.
+  The Dot 2 has a control of the same name that drives nothing.
+- **A codec filter, `biquad coefficients` (117 bytes).** It resets to zeros,
+  which is silence. The values are read at start-up from the unit's own
+  `/system/etc/audio_device.xml`, one for the speaker and one for the jack,
+  and never carried in the repository.
+- **Its own bass band.** Band 1 of the unit's own `MBCL.cfg` is 0 to 70Hz
+  from -25dB; the Dot 2's is 0 to 115Hz from -50dB, which removed the
+  woofer's bass at any normal level.
+- **Start-up.** The driver ramps the codec itself for about 1.3s before the
+  stream runs. The amp comes on, the DAC goes to unity, and the mute is
+  released last: of the orders tried, the quietest on the unit's own
+  microphones.
+
+No mute button LED is stated (`MuteLEDGPIO` empty), and there is no thermal
+profile, so emOS runs the kernel's defaults.

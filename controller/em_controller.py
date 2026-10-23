@@ -93,6 +93,7 @@ import em_dbwriter
 import em_tasks
 import em_pacing
 import em_platform
+import em_boards
 import em_tcp
 import em_wsclose
 import em_rttlog
@@ -5171,6 +5172,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # device reflashed between FireOS and emOS is the case it has to track.
         if device._base_os:
             em_dbwriter.submit(db.set_device_base_os, device_id, device._base_os)
+        # Which board, for the model HA shows; before the satellite exists.
+        if boards := em_boards.record(em_state.boards, device_id, msg.get("board")):
+            em_dbwriter.submit(db.set_config, em_boards.CONFIG_KEY, boards)
         # The running kernel, so emOS on FireOS 5's 64-bit kernel and FireOS
         # 6's 32-bit one can be told apart (schema v23). Absent on older
         # firmware; stored only when reported so a known value is not erased.
@@ -6102,6 +6106,8 @@ async def event_loop_lag_monitor(interval: float = 1.0,
 async def main():
     log.info(f"EchoMuse Controller {CONTROLLER_VERSION}")
     db.init(DB_PATH)
+    em_state.boards.update(em_boards.decode(await asyncio.get_running_loop()
+                           .run_in_executor(None, db.get_config, em_boards.CONFIG_KEY)))
     auth.maybe_generate_bootstrap_token()
     em_player.init(
         get_device=em_state.devices.get,

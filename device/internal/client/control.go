@@ -623,7 +623,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// nothing about it needs re-reporting every 30 seconds.
 		"base_os": platform.Base(),
 		// Which board detection matched (pkg/board), "unknown" when none did.
-		// Unread by current controllers, so safe to add unnegotiated.
+		// The controller names the model in Home Assistant from it.
 		"board": board.IDOf(board.Current()),
 	}
 	// The running kernel, `uname -m` and `uname -r`. Generic across boards, and

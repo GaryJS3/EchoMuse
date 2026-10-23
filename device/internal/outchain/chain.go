@@ -93,13 +93,17 @@ type Chain struct {
 	running bool // active on the previous period
 }
 
-// New builds a chain at the given sample rate, inactive, with DefaultParams.
-func New(sampleRate int) *Chain {
+// New builds a chain at the given sample rate, inactive, with DefaultParams
+// and biscuit's bass band.
+func New(sampleRate int) *Chain { return NewFor(sampleRate, DefaultGuardBand) }
+
+// NewFor is New with the bass band of the board's own driver.
+func NewFor(sampleRate int, band GuardBand) *Chain {
 	fs := float64(sampleRate)
 	c := &Chain{
 		fs:    fs,
 		eq:    eq{fs: fs},
-		guard: newBassGuard(fs),
+		guard: newBassGuard(fs, band),
 		lim:   newLimiter(fs),
 		idle:  true,
 	}

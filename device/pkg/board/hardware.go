@@ -39,6 +39,51 @@ type Hardware struct {
 	// can exist on a board whose radio is not behind it, so this is stated
 	// per board and never assumed.
 	HCI string
+	// Speaker is what the playback path needs beyond the codec routes, amp
+	// switch and jack table every board shares.
+	Speaker Speaker
+}
+
+// Speaker is a board's playback path where it differs between boards.
+type Speaker struct {
+	// AmpMute is a mixer switch that silences the amplifier while On. The
+	// codec driver sets it at every stream open and close, so the speaker
+	// releases it once its stream runs. "" when the board has none: biscuit
+	// has a control of the same name that drives nothing.
+	AmpMute string
+	// Filter is the codec's DSP filter, loaded from the device's own audio
+	// config. Nil when the board needs none.
+	Filter *CodecFilter
+	// Setup is written once, before the stream opens.
+	Setup []Ctl
+	// BassGuard is the band the bass guard protects on this driver.
+	BassGuard BassBand
+}
+
+// CodecFilter is a byte control whose values are read from the audio HAL's
+// XML config on the device's own /system, never compiled in: FireOS's HAL
+// loads it, emOS has none, and the codec resets to all zeros, which is
+// silence (#535).
+type CodecFilter struct {
+	Control string // the byte control
+	Bytes   int    // its size
+	File    string // the HAL's config
+	// Speaker and Jack are the paths whose "turnon" carries the filter for
+	// each output. Jack "" keeps the speaker's filter with a plug in.
+	Speaker, Jack string
+}
+
+// Ctl is one mixer write, by control name.
+type Ctl struct {
+	Name   string
+	Values []string
+}
+
+// BassBand is band 1 of the stock MBCL.cfg on a board's own driver: what it
+// removes, and from what level.
+type BassBand struct {
+	CrossoverHz float64
+	ThresholdDb float64
 }
 
 // LightSensor is an ambient light sensor on the i2c bus.
@@ -80,6 +125,39 @@ var biscuitHardware = &Hardware{
 	LightSensor: LightSensor{Driver: "tsl2540", Attr: "als_lux"},
 	// MediaTek's combo-chip (WMT) Bluetooth node.
 	HCI: "/dev/stpbt",
+	// Read off biscuit's MBCL.cfg (#229).
+	Speaker: Speaker{BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50}},
+}
+
+// radarHardware: read off 035T (FireOS 6, NS6575) on 2026-10-23. Every name
+// below and every PCM and i2c client is biscuit's, so the parts are; what
+// differs is the speaker. No number fallbacks: radar has no builds from
+// before boards were told apart.
+var radarHardware = &Hardware{
+	DotKeys:     Input{Name: "mtk-kpd"},
+	VolumeKeys:  Input{Name: "keys"},
+	LEDRing:     I2C{Driver: "is31fl3236"},
+	Capture:     PCM{Name: "TLV320AIC3101 Capture"},
+	Playback:    PCM{Name: "TLV320AIC3204 Playback"},
+	LightSensor: LightSensor{Driver: "tsl2540", Attr: "als_lux"},
+	HCI:         "/dev/stpbt",
+	Speaker: Speaker{
+		// Measured on 035T: the driver logs amp_mute=1 at every stream
+		// open and close, and the speaker is silent until this is Off.
+		AmpMute: "MFP Gpio Mute",
+		Filter: &CodecFilter{
+			Control: "biquad coefficients",
+			Bytes:   117,
+			File:    "/system/etc/audio_device.xml",
+			Speaker: "ext_speaker_output",
+			Jack:    "ext_headphone_output",
+		},
+		// Both of the HAL's output paths write it.
+		Setup: []Ctl{{"DRC Control", []string{"Disabled"}}},
+		// Radar's own MBCL.cfg band 1: 0-70Hz, 20:1 from -25dB. Biscuit's
+		// band removed the woofer's bass at any normal level.
+		BassGuard: BassBand{CrossoverHz: 70, ThresholdDb: -25},
+	},
 }
 
 // Layout is a board's Hardware resolved on the running device: what the
@@ -103,6 +181,9 @@ type Layout struct {
 	// switched on.
 	LightSensor LightSensor
 	HCI         string
+	// Speaker is the board's statement too; its filter is read by the
+	// speaker, which owns the codec.
+	Speaker Speaker
 
 	// Notes has one line per part saying how it was found, for the log.
 	Notes []string
@@ -118,7 +199,7 @@ func Resolve(root string, b *Board) *Layout {
 	if b != nil && b.Hardware != nil {
 		hw = b.Hardware
 	}
-	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensor: hw.LightSensor, HCI: hw.HCI}
+	l := &Layout{Board: b, MuteLEDGPIO: hw.MuteLEDGPIO, LightSensor: hw.LightSensor, HCI: hw.HCI, Speaker: hw.Speaker}
 	note := func(part, want, got string, err error) {
 		var line string
 		switch {

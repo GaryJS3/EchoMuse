@@ -92,3 +92,22 @@ func TestBoolValue(t *testing.T) {
 		}
 	}
 }
+
+func TestByteValues(t *testing.T) {
+	if b, err := byteValues("f", []string{"0", "128", "255"}, 3); err != nil || string(b) != "\x00\x80\xff" {
+		t.Fatalf("got %v, %v", b, err)
+	}
+	for _, bad := range [][]string{
+		{"7"},                // one value is never spread over a filter
+		{"1", "2"},           // short
+		{"1", "2", "3", "4"}, // long
+		{"1", "256", "3"},    // out of range
+		{"1", "-1", "3"},
+		{"1", "0x10", "3"},
+		{"1", "", "3"},
+	} {
+		if _, err := byteValues("f", bad, 3); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
