@@ -334,8 +334,8 @@ on. **Over a reply it is not yet reliable** (VVV, 2026-10-21): the barge-in
 turn's transcript was `" one quince. Never mind."`, its first 640ms loud,
 most likely the reply still playing through the 250ms arbitration hold
 before the flush; with extra words HA does not match the sentence and the
-LLM answered 11s later. Unconfirmed, and the fix (flush at the wake, before
-arbitration) is not built.
+LLM answered 11s later. Both barge paths now flush before the claim
+(`tests/test_barge_flush_order.py`); not yet run on hardware.
 
 **The protocol has NO run identifier, and HA does not serialise runs.**
 `VoiceAssistantEventResponse` is an event type plus a name/value list and

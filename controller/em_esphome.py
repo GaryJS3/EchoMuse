@@ -2159,9 +2159,17 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # keyed on _turn_cancelled, which this path deliberately never sets,
         # so it covered the thinking barge and missed the playback one it was
         # actually written for.
+        self.note_barged()
+        self.end_ha_run()
+
+    def note_barged(self) -> None:
+        """Record that this turn's reply was cut by a barge, first reason
+        winning. Separate from abort_ha_run because the flush goes out before
+        arbitration (#1007) and the device can report the end of playback in
+        that hold: the turn then finished `ok` before abort_ha_run ran (VVV
+        2026-10-23, twice)."""
         if self._turn_end_reason is None:
             self._turn_end_reason = "barged"
-        self.end_ha_run()
 
     def end_ha_run(self) -> None:
         """
@@ -3218,6 +3226,15 @@ def abort_ha_run(device_id: str) -> None:
     if satellite is None:
         return
     satellite.abort_ha_run()
+
+
+def note_barged(device_id: str) -> None:
+    """Mark the device's turn as cut off by a barge, at the flush. See
+    EchoMuseSatellite.note_barged."""
+    server = get_server(device_id)
+    satellite = server.get_satellite() if server is not None else None
+    if satellite is not None:
+        satellite.note_barged()
 
 
 async def push_media_state(device_id: str, state: str) -> None:
