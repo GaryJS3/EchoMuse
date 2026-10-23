@@ -2807,7 +2807,10 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
         "the firmware poll must select on a v* tag AND a server asset"
 
     emos = _strip_prose(_sources.def_source("fetch_emos"))
-    assert 'startswith("emos-v")' in emos and '"init"' in emos, \
+    assert "choose_release(" in emos, \
+        "the emOS poll must select through em_emos_update.choose_release"
+    chooser = _strip_prose(_sources.def_source("choose_release"))
+    assert 'startswith("emos-v")' in chooser and '"init"' in chooser, \
         "the emOS poll must select on an emos-v* tag AND an init asset"
 
     workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()

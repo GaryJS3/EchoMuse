@@ -82,6 +82,24 @@ jobs:
       attestations: write
 
     steps:
+      # The tag reaches a shell below, and git allows $ ( ) ; in a tag name.
+      # Every emOS tag ever cut matches this; anything else is refused before
+      # it can be interpolated anywhere. Same rule as release.yml.
+      - name: Refuse a malformed tag
+        run: |
+          echo "$GITHUB_REF_NAME" | grep -Eq '^emos-v[0-9]+\.[0-9]+(\.[0-9]+)?(-ea\.[0-9]+)?$' || {
+            echo "::error::$GITHUB_REF_NAME is not emos-vX.Y or emos-vX.Y-ea.N"; exit 1; }
+      # Early Access emOS is emos-vX.Y-ea.N, published as a prerelease, which
+      # GA controllers skip (em_emos_update.choose_release); EA and dev
+      # controllers offer it to the wizard and as an update.
+      - name: Channel
+        id: channel
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-ea.*) echo "prerelease=true"  >> "$GITHUB_OUTPUT" ;;
+            *)      echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -308,6 +326,7 @@ jobs:
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           name: emOS ${{ github.ref_name }}
+          prerelease: ${{ steps.channel.outputs.prerelease }}
           # The bundle, plus the loose `init` — and that one is NOT redundant.
           # `_fetch_latest_emos_release` selects a release by matching that exact
           # asset name, so a controller already in the field looks for it;

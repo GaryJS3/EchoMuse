@@ -22,6 +22,7 @@ import aiohttp
 import em_db as db
 import em_dbwriter
 import em_events
+import em_emos_update
 import em_firmware
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
@@ -384,7 +385,8 @@ def emos_latest_version() -> str:
 
 async def fetch_emos() -> Optional[dict]:
     """
-    The newest published emOS release carrying an `init` asset.
+    The newest emOS release this controller may install (em_emos_update.
+    choose_release): EA ones only on a controller that takes EA firmware.
 
     Separate from `fetch_firmware` rather than a parameter on it,
     because the two select on opposite things and share no cache: firmware is
@@ -413,28 +415,21 @@ async def fetch_emos() -> Optional[dict]:
         log.warning(f"[api] Could not poll GitHub for emOS releases: {e}")
         return None
 
-    for data in releases:
-        if data.get("draft") or data.get("prerelease"):
-            continue
-        tag = data.get("tag_name", "")
-        if not tag.startswith("emos-v"):
-            continue
-        assets = {a.get("name"): a for a in data.get("assets", [])}
-        # An `init` asset is still what makes a release selectable. That is the
-        # one every published release has carried, and requiring the newer
-        # `init32` instead would make every existing release invisible.
-        if "init" not in assets:
-            continue
-        # Every asset by name. There are two inits — one per kernel
-        # architecture — so picking one here would be picking for the caller.
-        _remember_emos(tag)
-        return {
-            "version": tag,
-            "assets": {n: {"url": a["browser_download_url"],
-                           "size": a.get("size", 0)}
-                       for n, a in assets.items() if n},
-        }
-    return None
+    # EA emOS (emos-vX.Y-ea.N) only for controllers that take EA firmware.
+    data = em_emos_update.choose_release(releases, _offers_ea_firmware())
+    if data is None:
+        return None
+    tag = data["tag_name"]
+    assets = {a.get("name"): a for a in data.get("assets", [])}
+    # Every asset by name. There are two inits — one per kernel architecture —
+    # so picking one here would be picking for the caller.
+    _remember_emos(tag)
+    return {
+        "version": tag,
+        "assets": {n: {"url": a["browser_download_url"],
+                       "size": a.get("size", 0)}
+                   for n, a in assets.items() if n},
+    }
 
 
 async def poll_loop() -> None:
