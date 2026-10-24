@@ -59,6 +59,8 @@ type Speaker struct {
 	Setup []Ctl
 	// BassGuard is the band the bass guard protects on this driver.
 	BassGuard BassBand
+	// Voicing is nil until the board's driver has been measured.
+	Voicing *Voicing
 }
 
 // CodecFilter is a byte control whose values are read from the audio HAL's
@@ -139,7 +141,10 @@ var biscuitHardware = &Hardware{
 	// MediaTek's combo-chip (WMT) Bluetooth node.
 	HCI: "/dev/stpbt",
 	// Read off biscuit's MBCL.cfg (#229).
-	Speaker: Speaker{BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50}},
+	Speaker: Speaker{
+		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
+		Voicing:   biscuitVoicing,
+	},
 }
 
 // radarHardware: read off 035T (FireOS 6, NS6575) on 2026-10-23. Every name

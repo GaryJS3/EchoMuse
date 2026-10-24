@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// guardReduction plays a sine through a guard-only chain on band and returns
-// the deepest bass reduction it applied.
+// guardReduction plays a sine through a guard-only chain on band, with no
+// voicing, and returns the deepest bass reduction it applied.
 func guardReduction(band GuardBand, hz, dbfs float64) float64 {
-	c := NewFor(48000, band)
+	c := NewFor(48000, band, nil)
 	p := DefaultParams()
 	p.LimiterEnabled = false
 	c.SetParams(p)
@@ -46,5 +46,22 @@ func TestEachBoardsBandProtectsItsOwnDriver(t *testing.T) {
 		if got < c.atLeast || got > c.le {
 			t.Errorf("%+v: %gHz at %gdBFS reduced %.1fdB, want %g..%g", c.band, c.hz, c.dbfs, got, c.atLeast, c.le)
 		}
+	}
+}
+
+// A board with no voicing plays the plain chain whatever the params ask, and
+// says so: the speaker's volume law is chosen from the params in force.
+func TestStockSoundNeedsTheBoardsVoicing(t *testing.T) {
+	c := NewFor(48000, GuardBand{CrossoverHz: 70, ThresholdDb: -25}, nil)
+	p := DefaultParams()
+	p.StockSound = true
+	c.SetParams(p)
+	c.SetActive(true)
+	c.Process(stereo(make([]int16, 512)))
+	if c.params.StockSound {
+		t.Fatal("StockSound in force on a board with no voicing")
+	}
+	if c.guard.upper != nil || len(c.corr.s) != 0 {
+		t.Fatal("upper bands or correction built with no voicing")
 	}
 }

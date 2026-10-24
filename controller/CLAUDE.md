@@ -847,6 +847,10 @@ recreate the misreading that cost an investigation on 2026-07-20.
 
 ## The output chain: EQ → bass guard → limiter
 
+Firmware announcing `stock_sound` adds the speaker's own voicing to this
+chain on the device (device/CLAUDE.md → "The speaker's voicing"); this
+section is the plain chain, still used for the jack and older firmware.
+
 Everything the speaker plays runs through three stages in `em_eq.apply` /
 `StreamingEQ.process`, in this order, all in float so nothing is quantised
 twice. **The order is load-bearing.**

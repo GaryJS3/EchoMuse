@@ -1428,12 +1428,12 @@ func playWakeCue(spk *speaker.PcmSpeaker) {
 
 // playVolumeCue previews the newly selected device volume. PlayCue is mixed
 // after software volume (so wake sounds can stay absolute), therefore these
-// samples carry the device-volume gain themselves.
+// samples carry the device-volume gain themselves, under the law in force.
 func playVolumeCue(spk *speaker.PcmSpeaker, level int) {
 	if spk == nil {
 		return
 	}
-	spk.PlayCue(cue.VolumeCue(speakerRate, speaker.VolumeGain(level)))
+	spk.PlayCue(cue.VolumeCue(speakerRate, spk.CueGain(level)))
 }
 
 // speakerRate mirrors the speaker binding's rate, declared here so this file

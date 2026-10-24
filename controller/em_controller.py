@@ -1132,6 +1132,11 @@ class Device:
         return "response_level" in (self.capabilities or [])
 
     @property
+    def stock_sound_capable(self) -> bool:
+        """Whether firmware voices its speaker and holds the bass guard on."""
+        return "stock_sound" in (self.capabilities or [])
+
+    @property
     def oww_trigger_capable(self) -> bool:
         """
         Whether this firmware can ACT on its own wake detection.

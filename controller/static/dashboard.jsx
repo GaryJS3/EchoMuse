@@ -694,11 +694,25 @@ function Select({ label, sub, value, options, onChange, disabled = false }) {
 
 // ─── EQ frequency response curve ─────────────────────────────────────────────
 
-function EqCurve({ bands, fs = 22050 }) {
-  const FREQS = [125, 250, 500, 1000, 2000, 3500, 5500, 8000];
-  const Q = 1.4, DB_RANGE = 14, N = 130, F_MIN = 60, F_MAX = 11000;
-  const W = 380, H = 90, PT = 8, PB = 20, PL = 8, PR = 8;
-  const IW = W - PL - PR, IH = H - PT - PB;
+// The x axis gives each band an equal column, so every band's centre sits
+// directly above its fader in EqSliders (both span the same width with eight
+// equal columns). Between centres it is logarithmic; past the ends it carries
+// on at the outer pair's spacing. fs is the device's chain rate: drawn at
+// 22050 the 8k shelf bent the top of the curve the device never produces.
+const EQ_FREQS = [125, 250, 500, 1000, 2000, 3500, 5500, 8000];
+
+function eqFreqAt(u) {
+  const F = EQ_FREQS, n = F.length, s = u * n - 0.5;
+  if (s < 0) return F[0] * Math.pow(F[1] / F[0], s);
+  if (s >= n - 1) return F[n-1] * Math.pow(F[n-1] / F[n-2], s - (n - 1));
+  const i = Math.floor(s);
+  return F[i] * Math.pow(F[i+1] / F[i], s - i);
+}
+
+function EqCurve({ bands, fs = 48000 }) {
+  const Q = 1.4, DB_RANGE = 14, N = 160;
+  const W = 400, H = 120, PT = 8, PB = 8;
+  const IH = H - PT - PB;
 
   function peakCoeffs(fc, g) {
     const A = Math.pow(10, g/40), w0 = 2*Math.PI*fc/fs;
@@ -725,47 +739,39 @@ function EqCurve({ bands, fs = 22050 }) {
     const dR=1+a[1]*c1+a[2]*c2,    dI=-(a[1]*s1+a[2]*s2);
     return Math.sqrt((nR*nR+nI*nI)/(dR*dR+dI*dI));
   }
+  const n = EQ_FREQS.length;
+  const filters = bands.map((g, i) =>
+    i === 0 ? loShelfCoeffs(EQ_FREQS[i], g) : i === n-1 ? hiShelfCoeffs(EQ_FREQS[i], g) : peakCoeffs(EQ_FREQS[i], g));
+  const dbAt = f => 20*Math.log10(Math.max(filters.reduce((m, c) => m * biquadMag(c, f), 1), 1e-10));
 
-  const pts = Array.from({length:N}, (_,i) => Math.exp(Math.log(F_MIN) + i/(N-1)*Math.log(F_MAX/F_MIN)));
-  const dbs = pts.map(f => {
-    let mag = 1;
-    bands.forEach((g,i) => {
-      mag *= biquadMag(i===0 ? loShelfCoeffs(FREQS[i],g) : i===7 ? hiShelfCoeffs(FREQS[i],g) : peakCoeffs(FREQS[i],g), f);
-    });
-    return 20*Math.log10(Math.max(mag, 1e-10));
-  });
-
-  const xOf = f  => PL + IW*(Math.log(f/F_MIN)/Math.log(F_MAX/F_MIN));
+  const xOf = u  => W * u;
   const yOf = db => PT + IH*(1 - (Math.max(-DB_RANGE, Math.min(DB_RANGE, db))+DB_RANGE)/(2*DB_RANGE));
 
-  const line = pts.map((f,i) => `${i===0?'M':'L'}${xOf(f).toFixed(1)},${yOf(dbs[i]).toFixed(1)}`).join(' ');
-  const fill = `${line} L${xOf(F_MAX).toFixed(1)},${yOf(0).toFixed(1)} L${xOf(F_MIN).toFixed(1)},${yOf(0).toFixed(1)}Z`;
+  const us = Array.from({length: N}, (_, i) => i / (N - 1));
+  const line = us.map((u, i) => `${i===0?'M':'L'}${xOf(u).toFixed(1)},${yOf(dbAt(eqFreqAt(u))).toFixed(1)}`).join(' ');
+  const fill = `${line} L${W},${yOf(0).toFixed(1)} L0,${yOf(0).toFixed(1)}Z`;
+  const centres = EQ_FREQS.map((f, i) => ({ x: xOf((i + 0.5) / n), y: yOf(dbAt(f)), on: bands[i] !== 0 }));
 
-  const dbTicks = [-12,-6,0,6,12];
-  const fTicks  = [{f:125,label:'125'},{f:500,label:'500'},{f:1000,label:'1k'},{f:4000,label:'4k'},{f:8000,label:'8k'}];
-
+  const mono = { fontFamily: "var(--font-mono)", fontSize: 8, fill: 'var(--muted)' };
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', display:'block', marginBottom:'var(--space-2)', borderRadius:'var(--radius-sm)', overflow:'hidden' }}>
-      <rect x={PL} y={PT} width={IW} height={IH} fill="var(--hairline)" rx="2"/>
-      {dbTicks.map(db => (
-        <line key={db} x1={PL} x2={PL+IW} y1={yOf(db)} y2={yOf(db)}
-          stroke={db===0?'rgba(0,0,0,0.18)':'var(--hairline)'}
-          strokeWidth={db===0?1:0.5} strokeDasharray={db===0?undefined:'2,3'}/>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', display:'block', marginBottom:'var(--space-3)', borderRadius:'var(--radius-sm)', overflow:'hidden' }}>
+      <rect x={0} y={0} width={W} height={H} fill="var(--hairline)"/>
+      {[-12, -6, 6, 12].map(db => (
+        <line key={db} x1={0} x2={W} y1={yOf(db)} y2={yOf(db)}
+          stroke="var(--muted)" strokeOpacity={0.25} strokeWidth={0.5} strokeDasharray="2,3"/>
       ))}
-      {fTicks.map(({f}) => (
-        <line key={f} x1={xOf(f)} x2={xOf(f)} y1={PT} y2={PT+IH}
-          stroke="var(--hairline)" strokeWidth={0.5}/>
+      {centres.map(({x}, i) => (
+        <line key={i} x1={x} x2={x} y1={PT} y2={H-PB} stroke="var(--muted)" strokeOpacity={0.15} strokeWidth={0.5}/>
       ))}
-      <path d={fill} fill="rgba(64,88,120,0.10)"/>
-      <path d={line} fill="none" stroke="var(--accent)" strokeWidth="1.5"
-        style={{filter:'drop-shadow(0 0 4px rgba(64,88,120,0.4))'}}/>
-      {dbTicks.filter(d=>d!==0).map(db => (
-        <text key={db} x={PL+2} y={yOf(db)+4}
-          style={{fontFamily:"var(--font-mono)",fontSize:6,fill:'var(--muted)'}}>{db>0?'+':''}{db}</text>
+      <line x1={0} x2={W} y1={yOf(0)} y2={yOf(0)} stroke="var(--muted)" strokeOpacity={0.5} strokeWidth={0.75}/>
+      <path d={fill} fill="color-mix(in srgb, var(--accent) 18%, transparent)"/>
+      <path d={line} fill="none" stroke="var(--accent)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round"/>
+      {centres.map(({x, y, on}, i) => (
+        <circle key={i} cx={x} cy={y} r={3} fill={on ? 'var(--accent)' : 'var(--hairline)'}
+          stroke="var(--accent)" strokeWidth={1.25}/>
       ))}
-      {fTicks.map(({f,label}) => (
-        <text key={f} x={xOf(f)} y={H-4} textAnchor="middle"
-          style={{fontFamily:"var(--font-mono)",fontSize:6,fill:'var(--muted)'}}>{label}</text>
+      {[-12, -6, 6, 12].map(db => (
+        <text key={db} x={3} y={yOf(db) + 3} style={mono}>{db > 0 ? '+' : ''}{db}</text>
       ))}
     </svg>
   );
@@ -2459,6 +2465,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 volumeCueCapable={!device.connected || !!device.volumeCueCapable}
                 remoteVolumeArcCapable={!device.connected || !!device.remoteVolumeArcCapable}
                 responseLevelCapable={!device.connected || !!device.responseLevelCapable}
+                stockSoundCapable={device.connected && !!device.stockSoundCapable}
                 wakeMicCapable={!device.connected || !!device.wakeMicCapable}
                 sendspinCapable={!device.connected || !!device.sendspinCapable}
                 sendspinPanel={device.connected && device.sendspinCapable
@@ -9532,7 +9539,9 @@ function ScopeChip({ children, tone }) {
 function EqSliders({ bands, onChange, disabled }) {
   const FREQ_LABELS = ['125', '250', '500', '1k', '2k', '3.5k', '5.5k', '8k'];
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 'var(--space-1)', ...(disabled ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}>
+    // Eight equal columns and no gap, so each fader sits under its band's
+    // centre on EqCurve, which uses the same columns.
+    <div style={{ display: 'flex', ...(disabled ? { opacity: 0.45, pointerEvents: 'none' } : {}) }}>
       {bands.map((g, i) => (
         <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, minWidth: 0 }}>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 'var(--fs-2xs)', color: g !== 0 ? 'var(--accent)' : 'var(--muted)', marginBottom: 'var(--space-1)', fontWeight: g !== 0 ? 600 : 400 }}>
@@ -9735,6 +9744,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             volumeCueCapable = true,
                             remoteVolumeArcCapable = true,
                             responseLevelCapable = true,
+                            stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
                             bleConnectCapable = true, blePanel = null }) {
@@ -9884,36 +9894,22 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     { value: 'pride',      label: 'Pride',      swatches: ['#bf0000', '#bf7700', '#a9bf00', '#00bf2c', '#0055bf', '#8b00bf'] },
     { value: 'custom',     label: 'Custom',     swatches: null },
   ];
-  // Measured, not chosen (2026-08-29). The driver was swept in three
-  // placements against the hardware echo reference, and the result agrees with
-  // stock's own FIR to 0.1dB at 315Hz and 0.0dB at 630Hz — two methods sharing
-  // no assumptions (#247). Relative to 1kHz the driver is ~18dB down at 250Hz
-  // and peaks ~+8.9dB at 3150Hz.
+  // Relative to the device's own voicing (#229). Firmware with the stock-sound
+  // profile corrects the driver itself, so Flat is the voicing picked by ear
+  // (the C/E midpoint, 2026-10-18) and these faders only lean it one way. The
+  // old Speech/Music presets were partial driver corrections and would stack
+  // on it; v32 resets them to Flat.
   //
-  // The old presets predate that measurement and one of them was backwards:
-  // 'Clarity' put +7dB on band 5 (3500Hz), which is exactly where the driver
-  // already peaks, landing around +16dB at 3150 — sibilance, not clarity.
-  // 'Warmth' had the right shape and a fraction of the size.
-  //
+  // Warm and Clear are the two voicings either side of Flat, C and E, fitted
+  // to these bands relative to it (within 1dB RMS, 3dB worst, 120Hz-8kHz).
   // Bands are [125 shelf, 250, 500, 1000, 2000, 3500, 5500, 8000 shelf].
-  // 125 stays 0 in every preset: it is a SHELF, so lifting it pushes
-  // everything below into the bass guard, which then removes it — the boost
-  // belongs at 250 where the band is a peaking filter. 5500 and 8000 stay 0
-  // on evidence rather than omission: those bands moved up to 13.8dB between
-  // placements, which is more than the whole ±12dB range, so anything set
-  // there tunes one room.
+  // 125 stays 0: it is a shelf, so a lift there goes straight into the bass
+  // guard, which removes it.
   const EQ_PRESETS = [
     // The bypass, and the reference for any A/B. Keep it exactly zero.
-    ['Flat',   [0, 0, 0, 0,  0,  0, 0, 0]],
-    // Gentler low-mid lift than Music: speech carries little energy below
-    // 300Hz, and the boost spends headroom the limiter then reclaims from the
-    // midrange. Keeps most of the driver's natural presence — 2-4kHz carries
-    // consonants — while taking the harsh edge off the 3150 peak.
-    ['Speech', [0, 4, 2, 0, -2, -5, 0, 0]],
-    // The full measured correction, bounded by what this driver will stand.
-    // Stock puts +19.9dB at 250Hz; +8 is the honest fraction our ±12 range and
-    // the limiter leave room for, and it is a value to walk up by ear.
-    ['Music',  [0, 8, 3, 0, -3, -6, 0, 0]],
+    ['Flat',  [0,  0,  0, 0,  0,  0, 0,  0]],
+    ['Warm',  [0,  4,  0, 0, -3, -1, 2, -6]],
+    ['Clear', [0, -2, -3, 1,  4, -1, 0,  4]],
   ];
   const activeEqPreset = (EQ_PRESETS.find(([, vals]) => JSON.stringify(vals) === JSON.stringify(bands)) || [null])[0];
 
@@ -9958,9 +9954,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
-            </div>
-            <div style={{ marginTop: 'var(--space-4)', ...inputStyle }}>
               <Toggle label="Speak while the reply is written"
                 sub="faster with a quick model; a slow one may pause"
                 value={config.streamReply ?? false} onChange={v => set('streamReply', v)}/>
@@ -10029,6 +10022,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        {/* Hidden on an Echo that voices its own speaker (stock_sound,
+            #229): its firmware keeps the guard on whatever this says, and
+            this is the only control in the section. Shown in the fleet view
+            and for an offline Echo, where it still governs older firmware
+            and the headphone jack. */}
+        {!stockSoundCapable && (
         <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
           <div style={inputStyle}>
             <Toggle label="Speaker protection"
@@ -10042,6 +10041,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             subtle by design and there is no reason to turn it off.
           </div>
         </StageAdvanced>
+        )}
       </Stage>
 
       {/* 02 WAKE WORD */}

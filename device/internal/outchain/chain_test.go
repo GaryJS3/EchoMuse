@@ -1,6 +1,7 @@
 package outchain
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/binary"
 	"encoding/json"
@@ -20,6 +21,7 @@ type vectorParams struct {
 	LimiterEnabled   bool      `json:"limiterEnabled"`
 	LimiterThreshold float64   `json:"limiterThreshold"`
 	LimiterRelease   float64   `json:"limiterRelease"`
+	StockSound       bool      `json:"stockSound"`
 }
 
 func (v vectorParams) params() Params {
@@ -30,6 +32,7 @@ func (v vectorParams) params() Params {
 		LimiterEnabled:     v.LimiterEnabled,
 		LimiterThresholdDb: v.LimiterThreshold,
 		LimiterReleaseMs:   v.LimiterRelease,
+		StockSound:         v.StockSound,
 	}
 	copy(p.Bands[:], v.Bands)
 	return p
@@ -251,5 +254,76 @@ func benchPeriod(b *testing.B, p Params) {
 	for i := 0; i < b.N; i++ {
 		copy(buf, src)
 		c.Process(buf)
+	}
+}
+
+// ProcessWide at unity must give exactly what Process gives: it is the same
+// chain, fed floats instead of S16, and the stock-sound profile relies on it
+// matching the vectors.
+func TestProcessWideAtUnityMatchesProcess(t *testing.T) {
+	p := DefaultParams()
+	p.StockSound = true
+	a, b := New(48000), New(48000)
+	for _, c := range []*Chain{a, b} {
+		c.SetParams(p)
+		c.SetActive(true)
+	}
+	for period := 0; period < 6; period++ {
+		buf := make([]byte, 2048*4)
+		wide := make([]float64, 2048*2)
+		for i := 0; i < 2048; i++ {
+			v := int16(20000 * math.Sin(2*math.Pi*220*float64(period*2048+i)/48000))
+			buf[i*4], buf[i*4+1], buf[i*4+2], buf[i*4+3] = byte(uint16(v)), byte(uint16(v)>>8), byte(uint16(v)), byte(uint16(v)>>8)
+			wide[i*2], wide[i*2+1] = float64(v), float64(v)
+		}
+		out := make([]byte, len(buf))
+		a.Process(buf)
+		b.ProcessWide(wide, out)
+		if !bytes.Equal(buf, out) {
+			t.Fatalf("period %d: ProcessWide differs from Process", period)
+		}
+	}
+}
+
+// Over full scale goes in, at most full scale comes out: the profile's top
+// volume steps rely on the limiter, and the clip is the backstop.
+func TestProcessWideNeverExceedsFullScale(t *testing.T) {
+	p := DefaultParams()
+	p.StockSound = true
+	c := New(48000)
+	c.SetParams(p)
+	c.SetActive(true)
+	wide := make([]float64, 2048*2)
+	for i := 0; i < 2048; i++ {
+		v := 4 * 32767 * math.Sin(2*math.Pi*1000*float64(i)/48000) // +12dB over
+		wide[i*2], wide[i*2+1] = v, v
+	}
+	out := make([]byte, 2048*4)
+	for k := 0; k < 4; k++ {
+		c.ProcessWide(wide, out)
+	}
+	for i := 0; i < 2048; i++ {
+		s := int16(uint16(out[i*4]) | uint16(out[i*4+1])<<8)
+		if s == math.MinInt16 {
+			t.Fatalf("frame %d hit the negative rail", i)
+		}
+	}
+}
+
+// The stock-sound voicing was tuned with the guard on, so a stored
+// bassGuardEnabled=false must not turn it off there; the plain chain (the
+// jack, older controllers) still honours it.
+func TestStockSoundKeepsTheGuardOn(t *testing.T) {
+	c := New(48000)
+	p := DefaultParams()
+	p.GuardEnabled = false
+	c.apply(p)
+	if !c.guard.enabled {
+		t.Error("stock sound: guard turned off by config")
+	}
+	p.StockSound = false
+	c.apply(p)
+	if c.guard.enabled {
+		t.Error("plain chain: guard should follow config")
 	}
 }

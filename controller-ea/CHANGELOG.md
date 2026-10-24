@@ -2,12 +2,19 @@
 
 ## 2.27.0-ea.2 (Early Access)
 
-The Echo gen 2 (radar), and release downloads work again. Pair with firmware v2.19.0-ea.2, which this controller offers. No database changes.
+The Dot's new sound, the Echo gen 2 (radar), and release downloads work again. Pair with firmware v2.19.0-ea.2, which this controller offers.
+
+**This release changes the database (schema v32), and it cannot be undone.** The first start resets the old Speech and Music EQ presets to Flat and turns Speech boost off, on every Echo and in fleet settings; a custom EQ curve is kept. Afterwards, an older controller refuses the database and does not start, so going back to 2.27.0-ea.1 means restoring a backup of the add-on taken before this update.
 
 ### New
 
+- **The Dot plays with its own voicing.** With firmware v2.19.0-ea.2 the Echo Dot's speaker is corrected for its driver, compressed in three bands as stock is, and gets louder in even 4 dB steps per volume press. Flat, Warm and Clear in the EQ are now relative to it, and Speaker protection is no longer shown for these Echoes, since the voicing needs it on. Speech boost is gone: a filter on voice replies does that job. Tell us how it sounds, voice and music both (#229).
 - **The Echo gen 2 (radar).** The setup wizard puts emOS on it, using the radar init in emOS Early Access (emOS only: the FireOS route refuses radar), and Home Assistant shows each Echo's own model instead of calling every one a Dot (#687).
 - **emOS Early Access.** This controller offers emOS releases named `emos-vX.Y-ea.N`; a GA controller never does (#1018).
+
+### Improved
+
+- The EQ curve lines each band's point up with its fader.
 
 ### Fixed
 
@@ -19,6 +26,7 @@ The Echo gen 2 (radar), and release downloads work again. Pair with firmware v2.
 ### Known issues
 
 - Radar plays through the plain output chain: its speaker has not been voiced yet.
+- With the new voicing, some voice replies may sound slightly muddy, and the new sound has not yet been checked for waking its own Echo at high volume. Please report either.
 - A command spoken straight on from the wake word loses its first word when the controller detects the wake word (#987).
 - The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
 - An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.

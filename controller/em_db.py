@@ -1149,6 +1149,14 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '31' WHERE key = 'schema_version';
     """,
+
+    # v32 — the old EQ presets on top of the stock-sound voicing (#229).
+    # Speech and Music were partial driver corrections; firmware with the
+    # profile corrects the driver itself, so either would stack another
+    # +4-8dB at 250Hz on it. The work is in _fixup_v32.
+    """
+    UPDATE system_config SET value = '32' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1270,8 +1278,56 @@ def _fixup_v25(conn) -> None:
         (json.dumps(cfg),))
 
 
+# The two presets the dashboard offered before the stock-sound voicing.
+_OLD_EQ_PRESETS = ([0, 4, 2, 0, -2, -5, 0, 0], [0, 8, 3, 0, -3, -6, 0, 0])
+
+
+def _reset_old_eq(cfg: dict) -> bool:
+    """Flatten an exact old preset and turn Speech boost off; True if changed."""
+    changed = False
+    bands = cfg.get("eqBands")
+    if (isinstance(bands, list) and len(bands) == 8
+            and all(isinstance(b, (int, float)) for b in bands)
+            and [float(b) for b in bands] in [[float(x) for x in p] for p in _OLD_EQ_PRESETS]):
+        cfg["eqBands"] = [0.0] * 8
+        changed = True
+    if cfg.get("eqLoudness") is True:
+        cfg["eqLoudness"] = False
+        changed = True
+    return changed
+
+
+def _fixup_v32(conn) -> None:
+    """
+    Reset the old Speech/Music presets to Flat and Speech boost to off, per
+    device and fleet. A custom curve is the owner's choice and is left alone,
+    as is a config that will not parse. Speech boost has no control any more,
+    so a stored True could never be turned off.
+    """
+    for row in conn.execute("SELECT device_id, config FROM devices").fetchall():
+        try:
+            cfg = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(cfg, dict) and _reset_old_eq(cfg):
+            conn.execute("UPDATE devices SET config = ? WHERE device_id = ?",
+                         (json.dumps(cfg), row["device_id"]))
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()
+    if not row:
+        return
+    try:
+        cfg = json.loads(row["value"] or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        return
+    if isinstance(cfg, dict) and _reset_old_eq(cfg):
+        conn.execute(
+            "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+            (json.dumps(cfg),))
+
+
 _MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19, 24: _fixup_v24,
-                     25: _fixup_v25}
+                     25: _fixup_v25, 32: _fixup_v32}
 
 # ─── Connection management ────────────────────────────────────────────────────
 

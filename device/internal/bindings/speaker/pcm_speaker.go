@@ -4,6 +4,7 @@ package speaker
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"log"
 	"math"
@@ -159,6 +160,18 @@ type PcmSpeaker struct {
 	// level whatever the volume.
 	vol softVolume
 	cue cueState
+	// volLevel is the last level SetVolume was given, and stock says which
+	// law turns it into vol's gain: the stock-sound profile's (applied BEFORE
+	// the chain, exceeding unity from level 107) while it is in force, else the
+	// 0.5dB-per-level one. See refreshStock.
+	volLevel  atomic.Int64
+	stock     atomic.Bool
+	stockWide []float64
+	// voicing is the board's (nil for none); the chain never puts the
+	// stock-sound law in force without one.
+	voicing *board.Voicing
+	// voiceFilter: the stock-sound profile's voice plane (stockPeriod).
+	voiceFilter *outchain.VoiceFilter
 	// response is a relative gain on the voice plane before it is mixed with
 	// music. The device volume still runs on the completed mix below, so the
 	// buttons remain authoritative; response caps itself against vol so their
@@ -265,11 +278,14 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		deadCh:        make(chan struct{}),
 		echoTap:       echoTap,
 		levelTap:      levelTap,
-		chain:         outchain.NewFor(48000, guardBand(board.CurrentLayout().Speaker.BassGuard)),
+		voicing:       board.CurrentLayout().Speaker.Voicing,
+		chain:         outchain.NewFor(48000, guardBand(board.CurrentLayout().Speaker.BassGuard), board.CurrentLayout().Speaker.Voicing),
 		chainParams:   outchain.DefaultParams(),
 		chainBuf:      make([]byte, periodBytes),
 		srcBuf:        make([]byte, periodBytes),
 		responseMix:   make([]float64, periodSize*2),
+		stockWide:     make([]float64, periodSize*2),
+		voiceFilter:   outchain.NewVoiceFilter(48000, board.CurrentLayout().Speaker.Voicing),
 		responseGains: make([]float64, periodSize),
 	}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
@@ -448,6 +464,7 @@ func (p *PcmSpeaker) SetJackRouting(inserted bool) {
 	p.jackInserted = inserted
 	p.jackKnown = true
 	p.chain.SetParams(chainForJack(p.chainParams, inserted))
+	p.refreshStock()
 	guardBypassed := inserted && p.chainParams.GuardEnabled
 	p.jackMu.Unlock()
 
@@ -595,8 +612,14 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var out []byte
-		if wideResponse {
-			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains)
+		if p.stock.Load() {
+			tgt := p.vol.targetGain()
+			if hasResponse {
+				tgt = response.volumeTarget
+			}
+			out = p.stockPeriod(voice, music, responseGains, tgt)
+		} else if wideResponse {
+			wide := p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains, nil)
 			if applied := p.chain.ProcessFloat(wide, responseGains); applied != nil {
 				log.Printf("[speaker] output chain: %s", applied)
 			}
@@ -649,6 +672,45 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 		meter.afterWrite()
 	}
+}
+
+// stockPeriod builds one period under the stock-sound profile, in stock
+// FireOS's order: the mix in float, then the volume, then the chain at the
+// TRUE level (ProcessWide), which may be over full scale from level 107 for the
+// compressors and limiter to bring back. The voice takes its own filter on
+// the way into the mix (outchain.VoiceFilter), so any period with voice
+// mixes in float. Returns the S16 period to write.
+func (p *PcmSpeaker) stockPeriod(voice, music []byte, responseGains []float64, volumeTarget float64) []byte {
+	wide := p.stockWide
+	if voice != nil {
+		wide = p.mixer.MixResponse(p.responseMix, voice, music, p.duckTarget.Load(), responseGains, p.voiceFilter)
+	} else {
+		p.voiceFilter.Reset()
+		mixed := p.mixer.Mix(voice, music, p.duckTarget.Load())
+		if mixed == nil {
+			if p.chain.Idle() {
+				p.vol.settle()
+				return silencePeriod
+			}
+			clear(wide) // filter tails still ringing out of the last audio
+		} else {
+			for i := 0; i < len(mixed)/2 && i < len(wide); i++ {
+				wide[i] = float64(int16(binary.LittleEndian.Uint16(mixed[i*2:])))
+			}
+		}
+	}
+	frames := len(wide) / 2
+	for i := 0; i < frames; i++ {
+		g := p.vol.gainAtFrame(i, frames, volumeTarget)
+		wide[i*2] *= g
+		wide[i*2+1] *= g
+	}
+	p.vol.cur = volumeTarget
+	out := p.chainBuf[:frames*4]
+	if applied := p.chain.ProcessWide(wide, out); applied != nil {
+		log.Printf("[speaker] output chain: %s", applied)
+	}
+	return out
 }
 
 // pump writes one mixed period to ALSA in hardware-period pieces, so the
@@ -750,6 +812,7 @@ func (p *PcmSpeaker) SetOutputChain(params outchain.Params) {
 	p.jackMu.Lock()
 	p.chainParams = params
 	p.chain.SetParams(chainForJack(params, p.jackKnown && p.jackInserted))
+	p.refreshStock()
 	p.jackMu.Unlock()
 }
 
@@ -767,6 +830,9 @@ func (p *PcmSpeaker) SetOutputChainActive(on bool) {
 	}
 	log.Printf("[speaker] output chain now runs on %s", where)
 	p.chain.SetActive(on)
+	p.jackMu.Lock()
+	p.refreshStock()
+	p.jackMu.Unlock()
 }
 
 // VoiceAudible reports whether a VOICE stream is audible: arriving, queued,
@@ -871,7 +937,44 @@ const dacUnity = "127"
 
 // SetVolume sets the playback volume as a device level (0..127, 0.5dB per
 // step, unity at 127). Takes effect from the next period, ramped across it.
-func (p *PcmSpeaker) SetVolume(level int) { p.vol.set(VolumeGain(level)) }
+func (p *PcmSpeaker) SetVolume(level int) {
+	p.volLevel.Store(int64(level))
+	p.applyVolumeLaw()
+}
+
+func (p *PcmSpeaker) applyVolumeLaw() {
+	level := int(p.volLevel.Load())
+	if p.stock.Load() {
+		p.vol.set(StockVolumeGain(level, p.voicing.CeilingDb))
+	} else {
+		p.vol.set(VolumeGain(level))
+	}
+}
+
+// CueGain is the volume tone's gain for a level under the law in force.
+func (p *PcmSpeaker) CueGain(level int) float64 {
+	if p.stock.Load() {
+		return CueVolumeGain(level, p.voicing)
+	}
+	return CueVolumeGain(level, nil)
+}
+
+// refreshStock decides whether the stock-sound law and order are in force:
+// the chain runs on this device, its params ask for the profile, and no plug
+// is in the jack (chainForJack). Behind a controller that processes the
+// audio itself the old law stays, or stock's loudness would arrive without
+// the correction and compressors that make it safe. Call with jackMu held.
+func (p *PcmSpeaker) refreshStock() {
+	on := p.chain.Active() && chainForJack(p.chainParams, p.jackKnown && p.jackInserted).StockSound
+	if p.stock.Swap(on) != on {
+		state := "off"
+		if on {
+			state = "on"
+		}
+		log.Printf("[speaker] stock-sound volume law %s", state)
+		p.applyVolumeLaw()
+	}
+}
 
 // SetResponseGainDB sets the gain applied only to the voice plane, before it is
 // mixed with music. It is relative to the device volume and dynamically capped

@@ -1282,6 +1282,11 @@ func capabilities() []string {
 	// "response_level": this firmware can apply the configured relative gain
 	// to the voice plane before it is mixed with music (#636).
 	//
+	// "stock_sound": this firmware voices this board's speaker (#229) and
+	// keeps the bass guard on while it does, whatever bassGuardEnabled says,
+	// so the dashboard hides that switch. Only on a board with a Voicing; the
+	// jack still gets the plain chain.
+	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
 	// action button 7 s while not on the encrypted link (pairing.go).
 	// Without it the controller offers the admin a Pair action instead,
@@ -1301,6 +1306,9 @@ func capabilities() []string {
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
 		"wake_word_off", "sendspin", "ble_connect"}
+	if board.CurrentLayout().Speaker.Voicing != nil {
+		caps = append(caps, "stock_sound")
+	}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

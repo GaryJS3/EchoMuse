@@ -122,6 +122,10 @@ func jackRouting(inserted bool) []mixerWrite {
 func chainForJack(p outchain.Params, inserted bool) outchain.Params {
 	if inserted {
 		p.GuardEnabled = false
+		// The stock-sound correction is for THIS driver; into headphones or
+		// an external speaker its +30dB at 175Hz is wrong, so the old law and
+		// order apply while a plug is in.
+		p.StockSound = false
 	}
 	return p
 }

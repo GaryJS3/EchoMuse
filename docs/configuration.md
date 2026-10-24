@@ -83,18 +83,17 @@ the fleet defaults will not affect it. The save succeeds either way, so the
 symptom is a control that appears to do nothing at all.
 
 ### Equalizer (8 faders + presets)
-Shapes the tone of the voice responses, like the EQ on a stereo. The Dot's
-little speaker is boomy and dull by default.
+Shapes the tone of everything the speaker plays. On firmware with the new
+sound, the Echo already corrects its own speaker, so **Flat** is the
+recommended setting and the presets lean it one way:
 
-- **Flat** — no shaping.
-- **Clarity** — boosts the upper-mid frequencies where speech intelligibility
-  lives. Good default for voice.
-- **Warmth** — gentle low-mid lift, softer top. Nicer for music-ish content.
+- **Flat**: the Echo's own voicing, no extra shaping.
+- **Warm**: more body, softer top.
+- **Clear**: leaner low end, more presence.
 - Drag any fader for a custom curve.
 
-### Speech boost
-An extra presence bump for spoken responses. Try it if responses sound
-muffled from across the room.
+Upgrading resets the old **Speech** and **Music** presets to Flat, because
+on the new sound they would boost the bass twice. A custom curve is kept.
 
 ### Response level
 Sets spoken responses relative to the device's normal volume: **Low** keeps

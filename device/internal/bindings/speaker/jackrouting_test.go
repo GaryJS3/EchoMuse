@@ -126,11 +126,11 @@ func TestJackRoutingDriftSkipsUnreadableControls(t *testing.T) {
 	}
 }
 
-// The bass guard is for the internal driver. With a plug in it must be off
-// whatever the controller configured, and everything else must pass through
-// untouched — in particular the limiter, which guards the EQ against clipping
-// (#231) on either output.
-func TestChainForJackBypassesOnlyTheGuardWithAPlugIn(t *testing.T) {
+// The bass guard and the stock-sound correction are for the internal driver.
+// With a plug in both must be off whatever the controller configured, and
+// everything else must pass through untouched — in particular the limiter,
+// which guards the EQ against clipping (#231) on either output.
+func TestChainForJackBypassesOnlyTheDriverStagesWithAPlugIn(t *testing.T) {
 	in := outchain.DefaultParams()
 	in.Bands[0] = 3
 	in.Loudness = true
@@ -140,10 +140,14 @@ func TestChainForJackBypassesOnlyTheGuardWithAPlugIn(t *testing.T) {
 	if got.GuardEnabled {
 		t.Errorf("guard must be bypassed with a plug in")
 	}
+	if got.StockSound {
+		t.Errorf("the stock-sound correction must be off with a plug in")
+	}
 	want := in
 	want.GuardEnabled = false
+	want.StockSound = false
 	if got != want {
-		t.Errorf("only GuardEnabled may change:\n got %+v\nwant %+v", got, want)
+		t.Errorf("only GuardEnabled and StockSound may change:\n got %+v\nwant %+v", got, want)
 	}
 	if !got.LimiterEnabled {
 		t.Errorf("limiter must stay on with a plug in")
