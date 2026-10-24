@@ -191,8 +191,9 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
             "capabilities": list(getattr(live, "capabilities", []) or []) if live else [],
             # When ambient_light is missing from the list above, this says
             # WHY: no_chip (hardware revision without the part), no_attribute
-            # (driver has not bound), or ok. None means firmware too old to
-            # report it — not a fault. Carries the i2c device names it saw,
+            # (listed, not fitted, no second source), unsafe (the tsl2584tsv
+            # would leak kernel memory per read), or ok. None means firmware
+            # too old to report it — not a fault. Carries the bus names it saw,
             # which is what makes a no_chip answer checkable rather than
             # merely asserted, and identifies an unfamiliar board revision
             # the first time one turns up (#90).

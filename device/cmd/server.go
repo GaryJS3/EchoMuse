@@ -72,7 +72,9 @@ func main() {
 				fmt.Println(n)
 			}
 			fmt.Printf("mute led gpio: %q\n", layout.MuteLEDGPIO)
-			fmt.Printf("light sensor: %q (%s)\n", layout.LightSensor.Driver, layout.LightSensor.Attr)
+			for _, ls := range layout.LightSensors {
+				fmt.Printf("light sensor: %q (%s, %s)\n", ls.Driver, ls.Attr, ls.Bus)
+			}
 			fmt.Printf("bluetooth hci: %q\n", layout.HCI)
 			os.Exit(0)
 		case "version", "--version", "-v":

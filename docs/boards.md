@@ -66,7 +66,8 @@ led ring: "is31fl3236" at /sys/bus/i2c/devices/0-003f
 capture: "TLV320AIC3101 Capture" at card 0 device 24
 playback: "TLV320AIC3204 Playback" at card 0 device 23
 mute led gpio: "444"
-light sensor: "tsl2540" (als_lux)
+light sensor: "tsl2540" (als_lux, i2c)
+light sensor: "tsl2584tsv" (illuminance0_input, iio)
 bluetooth hci: "/dev/stpbt"
 ```
 

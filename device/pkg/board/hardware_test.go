@@ -2,6 +2,7 @@ package board
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -34,8 +35,12 @@ func TestBiscuitResolvesToTheNumbersItAlwaysUsed(t *testing.T) {
 	if l.MuteLEDGPIO != "444" {
 		t.Errorf("mute LED gpio %q", l.MuteLEDGPIO)
 	}
-	if l.LightSensor != (LightSensor{"tsl2540", "als_lux"}) || l.HCI != "/dev/stpbt" {
-		t.Errorf("light sensor %+v, hci %q", l.LightSensor, l.HCI)
+	wantALS := []LightSensor{
+		{"tsl2540", "als_lux", BusI2C},
+		{"tsl2584tsv", "illuminance0_input", BusIIO},
+	}
+	if !reflect.DeepEqual(l.LightSensors, wantALS) || l.HCI != "/dev/stpbt" {
+		t.Errorf("light sensors %+v, hci %q", l.LightSensors, l.HCI)
 	}
 	if len(l.Problems) != 0 {
 		t.Errorf("parts not found by name on the fixture: %v", l.Problems)
@@ -160,8 +165,8 @@ func TestNoFallbackMeansNotAvailable(t *testing.T) {
 	if l.MuteLEDGPIO != "" {
 		t.Errorf("mute LED gpio %q on a board that states none", l.MuteLEDGPIO)
 	}
-	if l.LightSensor != (LightSensor{}) || l.HCI != "" {
-		t.Errorf("light sensor %+v and hci %q on a board that states neither", l.LightSensor, l.HCI)
+	if len(l.LightSensors) != 0 || l.HCI != "" {
+		t.Errorf("light sensors %+v and hci %q on a board that states neither", l.LightSensors, l.HCI)
 	}
 	if !strings.HasSuffix(l.LEDRing, "0-003f") {
 		t.Errorf("the ring is the same chip and should resolve: %q", l.LEDRing)
