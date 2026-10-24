@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.27.0-ea.2 (Early Access)
+
+The Echo gen 2 (radar), and release downloads work again. Pair with firmware v2.19.0-ea.2, which this controller offers. No database changes.
+
+### New
+
+- **The Echo gen 2 (radar).** The setup wizard puts emOS on it, using the radar init in emOS Early Access (emOS only: the FireOS route refuses radar), and Home Assistant shows each Echo's own model instead of calling every one a Dot (#687).
+- **emOS Early Access.** This controller offers emOS releases named `emos-vX.Y-ea.N`; a GA controller never does (#1018).
+
+### Fixed
+
+- **Firmware updates, the wizard's firmware step and the emOS update all failed to download** with "Got more than 8190 bytes", after GitHub lengthened a header on its download redirect (#1021).
+- **The wizard's emOS step failed with HTTP 413 behind a proxy** such as nginx. The boot image now goes in 512 KB pieces (#769, #800, #1001).
+- **Talking over a reply let up to 250 ms more of it into your command,** so "never mind" could reach Home Assistant with the reply's last words in front of it (#688).
+- **"Never mind" ended on the error sound.** A turn Home Assistant ends with nothing to say now ends on a brief green ring (#688).
+
+### Known issues
+
+- Radar plays through the plain output chain: its speaker has not been voiced yet.
+- A command spoken straight on from the wake word loses its first word when the controller detects the wake word (#987).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- Updating an Echo's firmware can stall the controller for a few seconds; a reply playing at that moment may stutter (#770).
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+- An emOS Echo on the 32-bit kernel sometimes reconnects without rebooting (#816).
+
+### Thanks
+
+@vithurshanselvarajah, @jcsnider, @sascha-hemi and @colin715 (#687), @volfyd (#1021), @Maximo1970 (#769), @itm1960 (#1001) and @jmealo (#688).
+
 ## 2.27.0-ea.1 (Early Access)
 
 Lighter on a small controller, and the 5 second wake stall is fixed. Pair with firmware v2.19.0-ea.1, which this controller offers. No database changes.
