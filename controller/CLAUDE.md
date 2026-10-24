@@ -326,9 +326,10 @@ handling made that unnecessary.
 (`assist_pipeline`, "Skip TTS"), and that is what its built-in "never mind"
 (`HassNevermind`, English sentences "never mind"/"nevermind" only) returns.
 It was `no_tts` and ended on the error cue, so the advice for stopping a
-reply worked and then reported a failure. It ends on `done_anim`, a fixed
-solid green for 1s (Wil, 2026-10-21: the thinking ring then dark read as cut
-off). A `TTS_START` with no URL after it stays `no_tts`. With an LLM agent,
+reply worked and then reported a failure. It ends on `done_anim`, a solid hold
+for 1s in the ring scene's own colour (Wil, 2026-10-21: the thinking ring then
+dark read as cut off; a fixed green until 2026-10-24, which clashed with every
+scene but standard). A `TTS_START` with no URL after it stays `no_tts`. With an LLM agent,
 HA only tries its own sentences when "Prefer handling commands locally" is
 on. **Over a reply it works since #1007 and #1014** (VVV, 2026-10-23): on
 2026-10-21 the barge-in turn's transcript was `" one quince. Never mind."`,

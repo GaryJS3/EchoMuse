@@ -104,9 +104,16 @@ def test_a_silent_reply_ends_on_the_done_cue_not_the_error_cue():
     assert em_controller._OUTCOME_ANIM["no_tts"] == "error_anim"
 
 
-def test_the_done_cue_is_a_brief_solid_green_in_every_scene():
+def test_the_done_cue_is_a_brief_solid_hold_in_the_scenes_own_colour():
     import em_scenes
-    for name in ("standard", "airy", "malevolent", "pride"):
-        cue = em_scenes.resolve({"ledScene": name})["done_anim"]
-        assert cue == {"pattern": "solid", "ttlSec": 1,
-                       "colors": [list(em_scenes.DONE_GREEN)]}
+    configs = [{"ledScene": n} for n in ("standard", "airy", "malevolent", "pride")]
+    configs.append({"ledScene": "custom", "ledListenColor": "#123456",
+                    "ledThinkColor": "#abcdef"})
+    for cfg in configs:
+        scene = em_scenes.resolve(cfg)
+        cue = scene["done_anim"]
+        assert cue["pattern"] == "solid" and cue["ttlSec"] == 1
+        assert cue["colors"] == scene["ack_anim"]["colors"], (
+            f"{cfg['ledScene']}: the done cue must take the scene's colour")
+    custom = em_scenes.resolve(configs[-1])["done_anim"]["colors"]
+    assert custom == [[0xab, 0xcd, 0xef]]

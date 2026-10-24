@@ -26,11 +26,6 @@ NUM_LEDS = 12
 # brightness itself when it renders a pulse.
 LINK_ORANGE = (255, 40, 0)
 
-# "Done, nothing to say" (Wil, 2026-10-21). Green means nothing else on the
-# ring, so it needs no legend.
-DONE_GREEN = (0, 255, 0)
-
-
 def _solid(r: int, g: int, b: int) -> list:
     return [(r, g, b)] * NUM_LEDS
 
@@ -289,12 +284,12 @@ def resolve(config: dict) -> dict:
             "pattern": "pulse", "colors": [list(LINK_ORANGE)],
             "periodMs": 500, "ttlSec": 1,
         },
-        # A brief solid green — "done, and there was nothing to say." Ends a
-        # turn HA answered with an empty reply ("never mind"), which otherwise
-        # went from the thinking ring to dark and read as cut off. Fixed
-        # colour, like no_ha_anim, so it means the same in every scene.
+        # A brief solid hold — "done, nothing to say." Ends a turn HA answered
+        # with an empty reply ("never mind"), which went from thinking to dark
+        # and read as cut off. Scene colour, like the other turn-end cues
+        # (Wil, 2026-10-24); a fixed green clashed with every other scene.
         "done_anim":      {
-            "pattern": "solid", "colors": [list(DONE_GREEN)],
+            "pattern": "solid", "colors": outcome_colors,
             "ttlSec": 1,
         },
     }
