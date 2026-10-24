@@ -245,9 +245,16 @@ There is no UART without opening the case. Three channels exist instead — and
 the LED ring is the first of them, since init takes it off the kernel's own
 `is31fl3236` boot animation and drives it as a progress bar (above):
 
-- **The progress trail.** init writes a marker at offset 0 of the cache
-  partition, `/proc/version` at 512, and an append-only trail at 1024, flushed
-  after every step. It is what turned "nothing happened" into
+- **The progress trail.** init writes it line by line, flushed after every
+  step, to two places. The first 1024 bytes of the cache partition hold the
+  start of it, up to and including mounting `/data`: that is the padding before
+  ext4's superblock, which ext4 never touches, so the cache stays a valid
+  filesystem for FireOS (from 1024 on, the old trail destroyed the superblock
+  every boot, and the Dot 3's cache has no backup to recover from). Read it
+  with `dd if=/dev/block/mmcblk0p15 bs=1024 count=1 | strings`. Once `/data`
+  is mounted the whole trail, including the kernel version, is in
+  `/data/emos/trail`, a fixed 3 KB padded with NULs so that each line costs
+  one block and no journal commit (`strings` it). It is what turned "nothing happened" into
   "`ttyGS0` open failed errno=2" and then into a shell, in three boots.
 - **`/proc/last_kmsg`.** There is no pstore on this kernel, but MediaTek's
   ram_console publishes the *previous* boot's kernel log here across a warm
@@ -919,8 +926,6 @@ is not proof it rebooted — compare uptime or a build fingerprint.
   is a Linux 4.17 addition on a 3.18 kernel. Both cfg80211 and the wlan
   driver are built in, so there is no module to replace — it is a kernel
   build, which puts it on the same fork as the arm64 kernel work.
-- The boot trail is a fixed-size buffer rewritten in place, so a shorter trail
-  leaves the tail of the previous boot's behind and can be misread.
 - **A device on emOS cannot start the wizard directly, and nothing in the
   wizard says so** — but since 0.4 there is a one-command way round it, so
   this is an unhelpful error rather than the dead end it was.

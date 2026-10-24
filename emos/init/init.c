@@ -47,7 +47,15 @@
 #define CACHE     "/dev/block/mmcblk0p15"
 #define USBDIR    "/sys/class/android_usb/android0"
 #define TTY       "/dev/ttyGS0"
-#define TRAIL_OFF 1024
+/* The raw trail fits in the 1024 bytes before ext4's superblock, the only
+ * part of the cache filesystem ext4 never reads or writes. Writing from 1024
+ * destroyed the superblock on every boot: biscuit's cache recovers it from a
+ * backup group, the donut's 32 MB single-group cache has none (2026-10-24). */
+#define TRAIL_RAW 1024
+/* The whole trail, once /data is mounted. */
+#ifndef TRAILFILE
+#define TRAILFILE "/data/emos/trail"
+#endif
 
 
 /* Device nodes, made from what the kernel says it registered.
@@ -223,12 +231,61 @@ static int mknodes(void)
  * 1 for seconds at a time. The parent only ever publishes the stage it has
  * reached into shared memory; it never writes a frame while the child lives.
  */
-/* Overridable so the ring animation can be rendered and checked off-target;
- * see emos/init/ringsim.c. */
-#ifndef LEDDIR
-#define LEDDIR "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
-#endif
+/* Found by the i2c device's name, as the firmware finds it (device/pkg/board
+ * I2CDevice): biscuit's sits at 11007000.i2c, the donut's at
+ * platform/soc/11009000.i2c, and a path that misses leaves the kernel's own
+ * animation running for ever. Biscuit's path is the fallback.
+ *
+ * LEDDIR is overridable so the ring animation can be rendered and checked
+ * off-target (emos/init/ringsim.c); defined, it is used as given. */
+#define LED_DRIVER  "is31fl3236"
+#define LED_FALLBACK "/sys/devices/soc/11007000.i2c/i2c-0/0-003f"
 #define LED_N  12
+
+static char led_dir_buf[256];
+
+/* Resolved once, in led_claim before the animator forks, so both share it. */
+static const char *led_dir(void)
+{
+    if (led_dir_buf[0])
+        return led_dir_buf;
+#ifdef LEDDIR
+    snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LEDDIR);
+#else
+    int found = 0;
+    DIR *d = opendir("/sys/bus/i2c/devices");
+    struct dirent *e;
+    while (d && (e = readdir(d))) {
+        char p[256], name[64];
+        snprintf(p, sizeof p, "/sys/bus/i2c/devices/%s/name", e->d_name);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0)
+            continue;
+        ssize_t n = read(fd, name, sizeof name - 1);
+        close(fd);
+        if (n <= 0)
+            continue;
+        name[n] = 0;
+        name[strcspn(name, "\n")] = 0;
+        if (strcmp(name, LED_DRIVER) == 0 && !found++)
+            snprintf(led_dir_buf, sizeof led_dir_buf,
+                     "/sys/bus/i2c/devices/%s", e->d_name);
+    }
+    if (d)
+        closedir(d);
+    if (found != 1)
+        snprintf(led_dir_buf, sizeof led_dir_buf, "%s", LED_FALLBACK);
+#endif
+    return led_dir_buf;
+}
+
+/* led_dir()/leaf, for the four attributes the ring is driven through. */
+static int led_open(const char *leaf, int flags)
+{
+    char p[300];
+    snprintf(p, sizeof p, "%s/%s", led_dir(), leaf);
+    return open(p, flags);
+}
 
 /* Defined further down; declared here so the orbit probe and the stage marks
  * can record into the boot trail and the network log. */
@@ -279,9 +336,12 @@ static long mono_ms(void);
  * the orbit ever needs re-measuring, on this board or another. */
 #define ORBIT_PROBE 0
 
-/* The orbit's ring, which is also what the tail repaints it with. */
-static const unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
-static const unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
+/* The orbit's ring, which is also what the tail repaints it with. Biscuit's
+ * kernel draws these; the donut's draws 0000C1 and 00FFC1 (41C8,
+ * 2026-10-25), so led_claim reads both off the orbit it is taking over
+ * (orbit_learn) and these are what is used when there is none to read. */
+static unsigned char C_ORBIT[3]  = { 0x00, 0x00, 0xFF };
+static unsigned char C_HEAD[3]   = { 0x00, 0xFF, 0xFF }; /* the orbit's head */
 static const unsigned char C_FAIL[3]   = { 0xFF, 0x00, 0x00 };
 static const unsigned char C_AMBER[3]  = { 0xFF, 0x60, 0x00 };
 /* Cyan is already full on two channels, so the only way UP is toward white —
@@ -348,7 +408,7 @@ static void led_write(const unsigned char f[LED_N][3])
         puthex(hex + p * 6 + 2, f[i][1]);
         puthex(hex + p * 6 + 4, f[i][2]);
     }
-    int fd = open(LEDDIR "/frame", O_WRONLY);
+    int fd = led_open("frame", O_WRONLY);
     if (fd < 0)
         return;
     write(fd, hex, sizeof hex);
@@ -503,42 +563,76 @@ static void anim_render(int head_q, int still, int failed, int trail)
     led_write(f);
 }
 
-/* Where the kernel's orbit had got to, in logical positions, so ours can carry
- * on from there instead of jumping to the bottom. The head is whichever single
- * segment is not the ground colour; anything else — a dark ring, a frame
- * already claimed by somebody, two lit segments — is not an orbit we can join,
- * and returns -1 to start at the bottom as before. */
-static int orbit_head_pos(void)
+static int hexval(char c)
 {
-    int fd = open(LEDDIR "/frame", O_RDONLY);
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Read the ring as 12 physical RGB triplets; 0 when `frame` cannot be read or
+ * is not 72 hex digits. */
+static int frame_read(unsigned char f[LED_N][3])
+{
+    int fd = led_open("frame", O_RDONLY);
     if (fd < 0)
-        return -1;
+        return 0;
     char b[LED_N * 6 + 8];
     int n = read(fd, b, sizeof b - 1);
     close(fd);
     if (n < LED_N * 6)
-        return -1;
-
-    char want[6];
-    puthex(want,     C_ORBIT[0]);
-    puthex(want + 2, C_ORBIT[1]);
-    puthex(want + 4, C_ORBIT[2]);
-
-    int found = -1, count = 0;
-    for (int L = 0; L < LED_N; L++) {
-        int p = (LED_BOTTOM + LED_DIR * L) % LED_N;
-        if (p < 0)
-            p += LED_N;
-        int same = 1;
-        for (int k = 0; k < 6; k++) {
-            char a = b[p * 6 + k], w = want[k];
-            if (a >= 'a' && a <= 'f') a -= 32;   /* the kernel prints lower */
-            if (w >= 'a' && w <= 'f') w -= 32;
-            if (a != w) { same = 0; break; }
-        }
-        if (!same) { found = L; count++; }
+        return 0;
+    for (int i = 0; i < LED_N * 3; i++) {
+        int hi = hexval(b[i * 2]), lo = hexval(b[i * 2 + 1]);
+        if (hi < 0 || lo < 0)
+            return 0;
+        f[i / 3][i % 3] = (unsigned char)(hi << 4 | lo);
     }
-    return count == 1 ? found : -1;
+    return 1;
+}
+
+/* The kernel's orbit is eleven segments of one colour and one of another.
+ * Returns the PHYSICAL index of the odd one out, or -1 for anything else — a
+ * dark ring, a frame already claimed by somebody, two lit segments. */
+static int orbit_odd_one(const unsigned char f[LED_N][3])
+{
+    /* The ground is whichever colour two of the first three share. */
+    int g = memcmp(f[0], f[1], 3) == 0 || memcmp(f[0], f[2], 3) == 0 ? 0 : 1;
+    int odd = -1, count = 0;
+    for (int p = 0; p < LED_N; p++)
+        if (memcmp(f[p], f[g], 3) != 0) { odd = p; count++; }
+    return count == 1 ? odd : -1;
+}
+
+/* Take the orbit's two colours off the ring itself, so the continuation is
+ * drawn in whatever blues this board's kernel uses. */
+static void orbit_learn(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return;
+    int odd = orbit_odd_one(f);
+    if (odd < 0)
+        return;
+    memcpy(C_HEAD, f[odd], 3);
+    memcpy(C_ORBIT, f[(odd + 1) % LED_N], 3);
+    note("orbit colours %02x%02x%02x head %02x%02x%02x\n", C_ORBIT[0],
+         C_ORBIT[1], C_ORBIT[2], C_HEAD[0], C_HEAD[1], C_HEAD[2]);
+}
+
+/* Where the kernel's orbit had got to, in logical positions, so ours can carry
+ * on from there instead of jumping to the bottom; -1 when there is no orbit
+ * to join, which starts at the bottom as before. */
+static int orbit_head_pos(void)
+{
+    unsigned char f[LED_N][3];
+    if (!frame_read(f))
+        return -1;
+    int p = orbit_odd_one(f);
+    if (p < 0)
+        return -1;
+    return ((p - LED_BOTTOM) * LED_DIR % LED_N + LED_N) % LED_N;
 }
 
 /* Boot complete: close the ring, fill both sides from the bottom to the top,
@@ -642,9 +736,9 @@ static void anim_claim(void)
             break;
         usleep(20000);
     }
-    int fd = open(LEDDIR "/boot_animation", O_WRONLY);
+    int fd = led_open("boot_animation", O_WRONLY);
     if (fd >= 0) { write(fd, "0", 1); close(fd); }
-    fd = open(LEDDIR "/led_current", O_WRONLY);
+    fd = led_open("led_current", O_WRONLY);
     if (fd >= 0) { write(fd, "3", 1); close(fd); }
 }
 
@@ -720,7 +814,7 @@ static void orbit_probe(void)
 {
 #if ORBIT_PROBE
     for (int i = 0; i < 10; i++) {
-        int fd = open(LEDDIR "/frame", O_RDONLY);
+        int fd = led_open("frame", O_RDONLY);
         if (fd < 0) {
             note("orbit probe: frame unreadable errno=%d\n", errno);
             return;
@@ -746,6 +840,8 @@ static void orbit_probe(void)
 static void led_claim(void)
 {
     main_pid = getpid();
+    note("led ring at %s\n", led_dir());
+    orbit_learn();
     orbit_probe();
     note("orbit head at %d\n", orbit_head_pos());
 
@@ -1152,6 +1248,12 @@ static long mono_ms(void)
     return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
 }
 
+/* The trail file, open from /data's mount to the shutdown. Kept at its full
+ * size so that each line is one pwrite and an fdatasync with no change of
+ * size: one data block per line, no journal commit, which matters to an eMMC
+ * that cannot be replaced. */
+static int trail_fd = -1;
+
 static void note(const char *fmt, ...)
 {
     char line[256];
@@ -1167,12 +1269,47 @@ static void note(const char *fmt, ...)
     n += p;
     if (n > (int)sizeof line - 1)
         n = sizeof line - 1;
-    if (trail_len + n + 1 < sizeof trail) {
-        memcpy(trail + trail_len, line, n);
-        trail_len += n;
-        trail[trail_len] = 0;
+    /* Full: nothing new to write, so nothing is written. */
+    if (trail_len + n + 1 >= sizeof trail)
+        return;
+    size_t off = trail_len;
+    memcpy(trail + trail_len, line, n);
+    trail_len += n;
+    trail[trail_len] = 0;
+
+    /* The raw 1024 is zeroed by the first line of each boot, so a shorter
+     * trail never leaves an earlier boot's tail to be misread; after that each
+     * line is written at its own offset until the 1024 is full. */
+    static int raw_fresh;
+    if (!raw_fresh) {
+        char raw[TRAIL_RAW] = { 0 };
+        memcpy(raw, trail, trail_len < TRAIL_RAW ? trail_len : TRAIL_RAW);
+        write_at(0, raw, sizeof raw);
+        raw_fresh = 1;
+    } else if (off < TRAIL_RAW) {
+        write_at(off, line, off + n <= TRAIL_RAW ? (size_t)n : TRAIL_RAW - off);
     }
-    write_at(TRAIL_OFF, trail, trail_len);
+    if (trail_fd >= 0) {
+        if (pwrite(trail_fd, line, n, off) == n)
+            fdatasync(trail_fd);
+    }
+}
+
+/* Called once /data is mounted. The file is opened without O_TRUNC and
+ * rewritten whole at its fixed size, so after the first boot it keeps the
+ * blocks it already has. */
+static void trail_open(void)
+{
+    mkdir("/data/emos", 0755);
+    int fd = open(TRAILFILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return;
+    if (pwrite(fd, trail, sizeof trail, 0) != (ssize_t)sizeof trail) {
+        close(fd);
+        return;
+    }
+    fsync(fd);
+    trail_fd = fd;
 }
 
 static int wr(const char *path, const char *val)
@@ -1387,6 +1524,9 @@ static const char *serialno(void)
  * product. Matched exactly, with serial_copy's rules for idme's trailing NUL.
  * Anything else is biscuit, which every emOS image before radar assumed. */
 #define RADAR_TYPE_ID "A7WXQPH584YP"
+#define DONUT_TYPE_ID "A32DOYMUN6DTXA"
+
+enum board { BOARD_BISCUIT, BOARD_RADAR, BOARD_DONUT };
 
 static int idme_type_is(const char *raw, const char *id)
 {
@@ -1394,23 +1534,33 @@ static int idme_type_is(const char *raw, const char *id)
     return serial_copy(raw, got, sizeof got) && strcmp(got, id) == 0;
 }
 
-static int board_is_radar(void)
+static enum board board_of(const char *raw)
 {
-    static int known, radar;
+    if (idme_type_is(raw, RADAR_TYPE_ID))
+        return BOARD_RADAR;
+    if (idme_type_is(raw, DONUT_TYPE_ID))
+        return BOARD_DONUT;
+    return BOARD_BISCUIT;
+}
+
+static enum board board(void)
+{
+    static int known;
+    static enum board b;
     if (known)
-        return radar;
+        return b;
     known = 1;
     char raw[64];
     int fd = open("/proc/idme/device_type_id", O_RDONLY);
     if (fd < 0)
-        return 0;
+        return b;
     ssize_t n = read(fd, raw, sizeof raw - 1);
     close(fd);
     if (n <= 0)
-        return 0;
+        return b;
     raw[n] = 0;
-    radar = idme_type_is(raw, RADAR_TYPE_ID);
-    return radar;
+    b = board_of(raw);
+    return b;
 }
 
 static void usbwr(const char *leaf, const char *val)
@@ -2099,6 +2249,40 @@ static void wpa_ctrl_dir(const char *conf, char *out, size_t n)
     }
 }
 
+/* The Dot 3's WiFi is an MT7668 on SDIO: two kernel modules and no WMT
+ * stack, so no wmt_loader, no launcher and no /dev/wmtWifi. Under FireOS
+ * its init loads them; under emOS nothing does.
+ *
+ * The firmware path is set FIRST. Without it the driver's direct load fails
+ * -2 and the kernel falls back to the user helper, which waits out its
+ * timeout once per file with nobody to answer (41C8, 2026-10-24). Never
+ * unload mid-probe: an rmmod then panicked the kernel. */
+#define SDIO_FW_DIR "/system/vendor/firmware"
+
+static int sdio_wifi_bringup(void)
+{
+    static const char *const mods[] = {
+        "/system/lib/modules/wlan_mt76x8_sdio_prealloc.ko",
+        "/system/lib/modules/wlan_mt76x8_sdio.ko", NULL };
+    int r = wr("/sys/module/firmware_class/parameters/path", SDIO_FW_DIR);
+    netlog("wifi: firmware path rc=%d errno=%d\n", r, r ? errno : 0);
+    for (int i = 0; mods[i]; i++) {
+        int fd = open(mods[i], O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            netlog("wifi: open %s failed errno=%d\n", mods[i], errno);
+            return -1;
+        }
+        long m = syscall(SYS_finit_module, fd, "", 0);
+        int e = errno;
+        close(fd);
+        netlog("wifi: load %s rc=%ld errno=%d\n", mods[i], m, m ? e : 0);
+        /* EEXIST: already loaded, by an earlier stage or by hand. */
+        if (m && e != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
 #define UDHCPC_SCRIPT "/tmp/udhcpc.sh"
 
 /* 24 turns of a 5s loop = two minutes. */
@@ -2113,8 +2297,11 @@ static void net_main(void)
     static const char *const loaders[] = { "/system/bin/wmt_loader",
                                            "/system/vendor/bin/wmt_loader", NULL };
     const char *ldr = first_exec(loaders);
-    int vendor = access("/system/bin/6620_launcher", X_OK) != 0
-              && access("/system/vendor/bin/wmt_launcher", X_OK) == 0;
+    /* The donut has neither launcher but is a FireOS 6 userspace, so it takes
+     * the vendor layout's supplicant and DHCP. */
+    int sdio = board() == BOARD_DONUT;
+    int vendor = sdio || (access("/system/bin/6620_launcher", X_OK) != 0
+                          && access("/system/vendor/bin/wmt_launcher", X_OK) == 0);
     char *loader[] = { (char *)(ldr ? ldr : loaders[0]), NULL };
     char *launch[] = { vendor ? "/system/vendor/bin/wmt_launcher"
                               : "/system/bin/6620_launcher", "-p",
@@ -2140,7 +2327,9 @@ static void net_main(void)
                                          "/system/bin/wpa_supplicant", NULL };
     const char *sup = first_exec(supps);
     netlog("wifi tools: %s layout, loader %s, supplicant %s\n",
-           vendor ? "vendor (FireOS 6)" : "system (FireOS 5)", loader[0],
+           sdio ? "SDIO modules" : vendor ? "vendor (FireOS 6)"
+                                         : "system (FireOS 5)",
+           sdio ? "none" : loader[0],
            sup ? sup : supps[1]);
     char cflag[160] = "-c" ANDROID_WPA_CONF;
     char *supp[]   = { (char *)(sup ? sup : supps[1]), "-iwlan0", "-Dnl80211",
@@ -2182,30 +2371,35 @@ static void net_main(void)
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
     char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
-    int st = 0;
+    int st = 0, r;
 
-    waitpid(spawn(loader), &st, 0);
-    netlog("wmt_loader status=%d\n", st);
-    /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
-    netlog("wmt: nodes after loader=%d\n", mknodes());
-
-    /* FireOS 6's wmt_launcher does not work here (see wmt_bringup above), so
-     * on that layout emOS configures the HIF and answers patch searches
-     * itself. FireOS 5's 6620_launcher is left alone: it works today on the
-     * fleet, and replacing a working path with an untested one is not a trade
-     * worth making until ours has run on hardware. */
     pid_t launcher = -1;
-    if (vendor) {
-        if (wmt_bringup("/system/vendor/firmware/", board_is_radar()))
-            netlog("wmt: bring-up failed, wlan0 will not appear\n");
+    if (sdio) {
+        if (sdio_wifi_bringup())
+            netlog("wifi: module load failed, wlan0 will not appear\n");
     } else {
-        launcher = spawn(launch);
-    }
-    sleep(2);
+        waitpid(spawn(loader), &st, 0);
+        netlog("wmt_loader status=%d\n", st);
+        /* wmt_loader's chip detection is what registers stpwmt and stpbt. */
+        netlog("wmt: nodes after loader=%d\n", mknodes());
 
-    mknodes();                          /* wmtWifi, once the chip is up */
-    int r = wr("/dev/wmtWifi", "1");
-    netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+        /* FireOS 6's wmt_launcher does not work here (see wmt_bringup
+         * above), so on that layout emOS configures the HIF and answers patch
+         * searches itself. FireOS 5's 6620_launcher is left alone: it works
+         * today on the fleet, and replacing a working path with an untested
+         * one is not a trade worth making until ours has run on hardware. */
+        if (vendor) {
+            if (wmt_bringup("/system/vendor/firmware/", board() == BOARD_RADAR))
+                netlog("wmt: bring-up failed, wlan0 will not appear\n");
+        } else {
+            launcher = spawn(launch);
+        }
+        sleep(2);
+
+        mknodes();                          /* wmtWifi, once the chip is up */
+        r = wr("/dev/wmtWifi", "1");
+        netlog("wmtWifi=1 rc=%d errno=%d\n", r, r ? errno : 0);
+    }
 
     for (int i = 0; i < 20 && access("/sys/class/net/wlan0", F_OK); i++)
         sleep(1);
@@ -2435,8 +2629,6 @@ static int tool_main(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-    char buf[512];
-
     if (getpid() != 1)
         return tool_main(argc, argv);
 
@@ -2472,15 +2664,7 @@ int main(int argc, char **argv)
     mkdir("/dev/pts", 0755);
     mount("devpts", "/dev/pts", "devpts", 0, NULL);
 
-    snprintf(buf, sizeof buf, "EM64-INIT-OK acm-console\n");
-    write_at(0, buf, strlen(buf));
-
-    int fd = open("/proc/version", O_RDONLY);
-    if (fd >= 0) {
-        int n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n > 0) write_at(512, buf, n);
-    }
+    note("EM64-INIT-OK acm-console\n");
     note("stage=mounts done devtmpfs_rc=%d nodes=%d tty=%d\n", dtr, nodes,
          access(TTY, F_OK));
     led_claim();
@@ -2564,7 +2748,22 @@ int main(int argc, char **argv)
     led_step();                                  /* 3: fsck /data */
 
     r = mount("/dev/block/mmcblk0p16", "/data", "ext4", 0, NULL);
+    if (r == 0)
+        trail_open();
     note("stage=mount_data rc=%d errno=%d\n", r, r ? errno : 0);
+    /* Which kernel booted, in the file only: it is ~200 bytes the raw 1024
+     * cannot spare, and only matters once the boot gets this far. */
+    int vfd = open("/proc/version", O_RDONLY);
+    if (vfd >= 0) {
+        char v[200];
+        int vn = read(vfd, v, sizeof v - 1);
+        close(vfd);
+        if (vn > 0) {
+            v[vn] = 0;
+            v[strcspn(v, "\n")] = 0;
+            note("kernel %s\n", v);
+        }
+    }
     if (r) led_fail(); else led_step();          /* 4: /data */
 
     /* Android's own root has these two symlinks and a surprising amount of
@@ -3459,8 +3658,12 @@ static void do_shutdown(void)
     run_wait(dump);
     sync();
     sync();
-    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     note("stage=shutdown done\n");
+    if (trail_fd >= 0) {
+        close(trail_fd);
+        trail_fd = -1;
+    }
+    mount(NULL, "/data", NULL, MS_REMOUNT | MS_RDONLY, NULL);
     sync();
     reboot(RB_AUTOBOOT);
 }
