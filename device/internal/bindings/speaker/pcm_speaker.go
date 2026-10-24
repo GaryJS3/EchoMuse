@@ -965,7 +965,7 @@ func (p *PcmSpeaker) CueGain(level int) float64 {
 // audio itself the old law stays, or stock's loudness would arrive without
 // the correction and compressors that make it safe. Call with jackMu held.
 func (p *PcmSpeaker) refreshStock() {
-	on := p.chain.Active() && chainForJack(p.chainParams, p.jackKnown && p.jackInserted).StockSound
+	on := stockLawOn(p.voicing, p.chain.Active(), p.chainParams, p.jackKnown && p.jackInserted)
 	if p.stock.Swap(on) != on {
 		state := "off"
 		if on {

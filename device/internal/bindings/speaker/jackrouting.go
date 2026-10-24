@@ -3,6 +3,7 @@ package speaker
 import (
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Jack routing: the codec state each plug position needs.
@@ -165,4 +166,14 @@ func jackRoutingDrift(inserted bool, current map[string]string) []mixerWrite {
 		}
 	}
 	return out
+}
+
+// stockLawOn is whether the stock-sound volume law and order are in force:
+// the board has a voicing, the chain runs on this device, and its params ask
+// for the profile with no plug in. The voicing test is its own: the params
+// still ask for the profile on a board with none (DefaultParams), since the
+// chain clears it only on its own copy, and radar applied the law with a nil
+// voicing and panicked on every connect (2026-10-24).
+func stockLawOn(v *board.Voicing, chainActive bool, p outchain.Params, plugged bool) bool {
+	return v != nil && chainActive && chainForJack(p, plugged).StockSound
 }
