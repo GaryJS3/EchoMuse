@@ -5418,3 +5418,52 @@ the dev add-on from plain main stopped it at start: its database is at schema
 v32 from the unmerged stock-sound branch, and the check refused before writing
 anything. A radar (Echo gen 2, FireOS 6, 32-bit kernel) is on the bench with
 root adb.
+
+## 2026-10-24 — radar in, a GA fix cut from the GA tag, and the radar's own speaker measured
+
+**Radar runs EchoMuse, on FireOS 6 and on emOS** (#1016, #1017, merged the
+evening of 10-23). From #687's port by @jcsnider and @vithurshanselvarajah,
+with @sascha-hemi's jack and bass findings and @colin715's runs, rebuilt as
+our own series: the speaker's differences are board data (a hardware mute the
+driver asserts at every open, a 117-byte codec filter read off the unit's own
+HAL config, a 70 Hz bass band from radar's own MBCL), one init for both
+boards, and the kernel patch checked by structure where #687 pinned one hash
+that refused both of our kernels. The second unit, 07MU, was provisioned by
+the wizard end to end and network-updated to `emos-v0.11-ea.1`, the first
+emOS Early Access (#1018). Its first boot on 0.10's init associated without
+the WMT calls #687 found necessary on NS6572; they are kept.
+
+**Every release download failed, for every controller** (#1021, reported with
+the cause by @volfyd). github.com's 302 to a release asset now carries a
+9,243-byte `Content-Security-Policy` header, and aiohttp refuses a header
+field over 8,190 bytes, so firmware OTA, the wizard's firmware step and the
+emOS update all failed while release polling, on api.github.com, kept offering
+the update. Main had moved 12 commits past 2.26.1, so 2.26.2 was cut from
+2.26.1's own commit with only the fix (`release/2.26.2`). The branch did not
+build at first: 2.26.1 predates the runner pins (#1011), and `ubuntu-latest`
+is now 26.04 with no `qemu-user-static`. On the UAT rig the 2.26.2 image
+downloaded v2.18.1 (12,591,808 bytes) and installed it on VVV, which came back
+in 6 s. The GA add-on's changelog then showed 2.27.0-ea.1's notes directly
+under 2.26.2's, because Supervisor shows the whole file; EA notes now live in
+the channel's own file (#1023).
+
+**07MU went back to stock FireOS 6 as the radar reference.** The XDA sequence
+installs, flips the active slot and installs again, but this TWRP marks the
+slot it wrote as active, so the flip sent the second install to B again; an
+extra install wrote A. `boot-root.zip` roots slot `_b` only, so the unit
+boots `_b`.
+
+**Radar's driver is not biscuit's, and stock's EQ says the same.** Through its
+own centre mic against the playback loopback (one placement, 0.18 dB between
+two sweeps): within +1 to +3 dB of 1 kHz from 160 Hz to 1 kHz, −10 dB at
+100 Hz, −28 dB at 63 Hz, where biscuit's is −18 dB at 250 Hz. Stock's FIR
+cuts where this measures peaks (−2.9 dB at 200 Hz against +2.8; −3.8 at 2 kHz
+against +4.6) and boosts the 3.15 kHz dip; the two disagree only at 1.25 kHz
+and 6.3 kHz, which one placement cannot settle. Its bass boost falls as the
+volume rises (+15 dB at 80 Hz at 50%, +5 at 100%), the opposite of biscuit's.
+Distortion is low from 300 Hz up and climbs fast below 150 Hz: at −6 dBFS a
+70 Hz tone's third harmonic is 3.7 dB under the tone. Stock answers that with
+four compressor bands at 70/200/3250 Hz, which map one to one onto the
+chain's bass guard and three upper bands. The stock-sound voicing moved into
+board data on a local branch so radar keeps the plain chain until its own is
+heard; a candidate fitted to these numbers is built and not yet played.

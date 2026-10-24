@@ -258,7 +258,8 @@ input devices, the ring's i2c driver, the mic and speaker PCM stream names,
 the light sensor and its lux attribute, the mute LED GPIO and the Bluetooth
 HCI device. `board.Resolve` finds them (`/proc/bus/input/devices`,
 `/proc/asound/pcm`, `/sys/bus/i2c/devices/*/name`) once per process, and the
-bindings open `board.CurrentLayout()`. Only biscuit is registered.
+bindings open `board.CurrentLayout()`. Biscuit and radar (the Echo gen 2,
+never "Dot 3": that is donut) are registered.
 
 - **Biscuit keeps its old numbers as a FALLBACK, and a new board must not get
   one.** The fallback exists so a FireOS build that names a part differently
@@ -287,14 +288,40 @@ Names were read on 2026-10-04 from VVV (FireOS 5.5.5.4), 15LE (emOS, FireOS 6
 `TLV320AIC3101 Capture` 0-24, identical on all three. VVV's output is the
 fixture `pkg/board/testdata/biscuit-fireos5/`.
 
+**Radar is biscuit's board with a different speaker (#1016, 2026-10-23).**
+Read on 035T (stock FireOS 6, NS6575): every input device, PCM and i2c client
+matches biscuit by name and number, the capture is the same 9 channels in the
+same order (a tap test on each mic hole: ch1,2,3,4,5,0 clockwise from the
+action button, ch6 centre), the ring runs the same way, and the right channel
+reaches the driver (58dB apart, 07MU 2026-10-24). The differences are data in
+`Hardware.Speaker`, never a branch in a driver (`TestNothingBranchesOnBoardIdentity`):
+
+- **`AmpMute` (`MFP Gpio Mute`).** The codec driver asserts it at every stream
+  open and close and keeps it across an XRUN, so the speaker is silent until
+  it is released. Biscuit has a control of that name that drives nothing,
+  hence "" there.
+- **`Filter`, the codec's 117-byte `biquad coefficients`**, read at start-up
+  from the unit's own `/system/etc/audio_device.xml` (the speaker and
+  headphone paths' "turnon"), never compiled in: the codec resets to zeros,
+  which is silence (#535), and the values are Amazon's. Swapped while a plug is
+  in.
+- **`Setup`** (`DRC Control` Disabled), written once before the stream opens,
+  as both HAL output paths do.
+- **`BassGuard` 70Hz / -25dB**, radar's own stock MBCL band 1. Biscuit's
+  115Hz / -50dB took the woofer's bass off at any normal level.
+
+**Start-up is amp, then DAC, then the mute released once the stream is
+RUNNING**, chosen by recording radar's own mics through each order. The driver
+ramps for ~1.25s in prepare on BOTH boards (RUNNING after it), so biscuit's
+start now waits for it too and starts ~1.1s later than before #1016.
+`Ignore Ramp Up` On skips the ramp and clicks; it was tried and rejected.
+
 **Still biscuit's, inside the drivers:** the 9-channel S24 capture layout,
-`codec.Routes`, the amp switch and DAC unity, the jack tables, start-up
-ordering and the Android `stop <service>` names. They move into `Hardware`
-with the first second board. What the two existing ports need, from reading
-their diffs (nothing verified on hardware of ours): radar is close to biscuit (same SoC, ring, PCM layout and four
-ADCs; a speaker amp with a mute GPIO and a 117-byte filter); the Dot 3 needs
-behaviour as well as data (a 48kHz capture opened before the mic, no amp
-switch, unity at 255, 4-channel S32 capture, a different radio).
+`codec.Routes`, the amp switch and DAC unity, the jack tables and the Android
+`stop <service>` names. Radar needed none of them changed. The Dot 3 (donut)
+needs behaviour as well as data, from reading its port's diff (nothing
+verified on hardware of ours): a 48kHz capture opened before the mic, no amp
+switch, unity at 255, 4-channel S32 capture, a different radio.
 
 ## Private listening (the default since 2026-09-21)
 

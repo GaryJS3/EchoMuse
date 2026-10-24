@@ -1233,6 +1233,7 @@ single written ladder. `docs/audio-states.md` §2 is the nearest thing.
 | `em_routes_*.py` | One module per route area (auth, devices, activity, config, updates, provision, link, system, static, shell, events, oww), each with `register(app)`. Shared pieces sit below them: `em_http`, `em_events`, `em_shell`, `em_device_view`, `em_device_config`, `em_ota`, `em_emos_ota`, `em_oww_sync`, `em_reconcile`, `em_payloads`, `em_releases`, `em_process_stats` |
 | `em_state.py` | Process-wide live state: the device registry, shell session coordination, the OWW model caches, the wake arbiter, the loop lag peak. **Its own module because em_controller runs as `__main__`**, so anything importing em_controller by name gets a second copy with empty state (#306). Every reader and writer imports em_state by name; no aiohttp or openwakeword, so the suite imports it unstubbed |
 | `em_emos_update.py` | Updating emOS in place: the checks, the device commands and the sequence, against an `io` the tests can stand in for. Pure |
+| `em_boards.py` | Which Echo a device is, as Home Assistant shows it (#1016): the firmware's `board` from registration, stored as one JSON map in system_config (`device_boards`) for satellites started before their Echo connects. **Biscuit's model string must never change**, or every existing HA device shows a new model; a board newer than the controller shows `Echo (<id>)`, never biscuit's. Pure |
 | `em_db.py` | SQLite persistence (devices, config, logs, users) |
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS and music before playback; also hosts the chain, calling the guard and limiter in order |
@@ -1882,6 +1883,33 @@ without one (Wil, 2026-10-02); the rollback itself was run. Exercise it with
 its own image and the controller should log the "rewrote its known-good
 image" line.
 
+**emOS has an Early Access channel too (#1018, 2026-10-23):** `emos-vX.Y-ea.N`
+publishes as a GitHub prerelease, and `em_emos_update.choose_release` makes a
+GA controller skip a release by the prerelease flag AND by the `-ea.N` name,
+as `choose_firmware_release` does; EA and dev controllers get both, newest by
+version, never list order. `version_key` orders `0.11-ea.1 < 0.11-ea.2 <
+0.11`, so an EA device is offered its next EA and its GA and never an older
+GA. First used for radar's init (`emos-v0.11-ea.1`). A controller sees a new
+release on its hourly poll or "Check for updates".
+
+**Radar runs the same init as biscuit's 32-bit kernel (#1017).** Init tells
+the board from the product id in `/proc/idme`, as the firmware does: no third
+init asset, no `emos.board=` stamp, no board choice in the wizard. Radar's
+bootloader starts `boot_a` whatever the slot suffix says (amonet 2's
+behaviour, #544), so init's fixed boot partition and the wizard's slot plan
+hold, and every node init creates has biscuit's numbers. Radar's WiFi bring-up
+adds the WMT calls its stock launcher makes (from #687, needed on NS6572);
+07MU's first boot on 0.10's init, without them, associated anyway on NS6575,
+so they are kept as the safe default rather than proven necessary. Radar's
+LK appends `skip_initramfs`, and the build renames it in the user's own kernel
+(`em_emos_build.keep_initramfs`), **checked by structure, never by kernel
+hash** (one compressed stream, one occurrence, same length, verified by
+decompressing): #687 pinned it to one NS6572 SHA and refused both of our
+kernels. Radar's stock cmdline is 976 bytes against the 32-bit kernel's 1024,
+so emOS's cmdline truncates LK's tail, `skip_initramfs` included, which is
+luck and not a reason to drop the patch. A network update keeps the running
+kernel byte for byte and needs none of this.
+
 Not built yet: a manual roll-back button, emOS in the fleet "update all", and
 checking the release's attestation before use (firmware does not either).
 `POST /api/emos/upload` takes a locally built `emos-payload.zip`, as Local
@@ -2017,6 +2045,20 @@ Two device behaviours the wizard works around rather than fixes:
   survives the name differing across SKUs), `stop` it, then kill. Its
   presence is not cosmetic: a run with it running spent 9s cycling
   DISCONNECTED/SCANNING before associating, against 1s on a clean one.
+
+### Radar (#1017, 2026-10-23)
+
+The wizard recognises radar from its `/system` (`AEORD` / `radar_puffin`,
+`_echoBoard`, `echo_board.test.mjs`), refuses it on the FireOS flow, and sends
+the board with the build. `donorVerdict` skips amonet-biscuit's bootloader
+fingerprint, which means nothing on radar, and keeps every FireOS 6 check on
+both slots and the kernels. **The board is read off the device, never taken
+from what the page says**: a DTB says `MT8163` on every board. First full run
+on 07MU 2026-10-23, end to end, then a network update to `emos-v0.11-ea.1` in
+39s. Restoring a radar to stock is in TWRP with the XDA sequence, except that
+this TWRP marks the slot it installed to as active, so the post's flip makes
+the second install hit B again: install until slot A has been written, and
+finish on `_b`, the slot `boot-root.zip` patches for root.
 
 ### The emOS flow, and what a run against real hardware found
 
