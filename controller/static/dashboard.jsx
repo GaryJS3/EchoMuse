@@ -1779,7 +1779,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       setAssetNow(null);
       setAssetResult({ ok: true, text: n === 0
         ? 'Already up to date — nothing needed installing.'
-        : `Installed ${n} file${n === 1 ? '' : 's'}. Restart the device to start scoring on-device.` });
+        : `Installed ${n} file${n === 1 ? '' : 's'}.` });
       setAssets(await API.get(`/api/devices/${device.device_id}/oww_assets`));
     } catch(e) {
       setAssetNow(null);

@@ -590,10 +590,15 @@ def test_the_image_builds_the_streaming_model_and_checks_its_pair():
         "the package's embedding_model.onnx must be checked against the stage's input hash"
 
 
-def test_pushing_only_the_streaming_model_does_not_ask_for_a_restart():
-    """The firmware rebuilds its scorer when the file appears; the reconcile
-    sends the config push that triggers it."""
+def test_no_install_asks_for_a_restart():
+    """The device rebuilds its scorer from a config push, so an install never
+    asks for a restart; the caller that installed sends the push. The
+    dashboard's install said "restart the device" and sent nothing, and 035T
+    stayed deaf until it was restarted (2026-10-24)."""
     sync = _sources.code_only(_sources.def_source("em_oww_sync._sync_locked"))
-    assert "a.kind not in ('vad', 'stream')" in sync
+    assert "restart" not in sync
     reconcile = _sources.code_only(_sources.def_source("em_oww_sync.reconcile"))
     assert "em_oww_assets.STREAM_NAME in" in reconcile and "send_control" in reconcile
+    route = _sources.code_only(_sources.def_source("em_routes_oww._post_oww_assets"))
+    assert "em_oww_sync.push_config(" in route, (
+        "the dashboard's install must tell the device to rebuild its scorer")

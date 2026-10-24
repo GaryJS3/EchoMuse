@@ -2322,7 +2322,7 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     All three talk to one device over one shell plane. Gathering them contends
     for a single session for no gain — nothing is on a critical path here.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
 
     for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
@@ -2337,7 +2337,7 @@ def test_one_failing_payload_does_not_skip_the_others():
     wake word models, so each step is caught individually rather than the loop
     being wrapped in one try.
     """
-    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
     body = fn[fn.index("for name"):]
     assert "try:" in body and "except Exception" in body, (
         "each step must be caught inside the loop, not around it"
