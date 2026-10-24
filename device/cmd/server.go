@@ -371,10 +371,11 @@ func main() {
 		}
 	}()
 
-	// A 5 s hold of the action button asks to pair (client/pairing.go). The
-	// white flash says the hold registered: on a connected device nothing
-	// else changes on the ring until an admin approves.
-	pairHold := client.NewPairHold(func() {
+	// A 7 s hold of the action button asks to pair, unless the Echo is on
+	// the encrypted link (client/pairing.go, #841). The white flash says the
+	// hold registered: on a connected device nothing else changes on the
+	// ring until an admin approves.
+	pairHold := client.NewPairHold(controlClient.PairingNeeded, func() {
 		s.Flash(150, 150, 150, 400*time.Millisecond)
 		controlClient.StartPairing()
 	})
@@ -515,7 +516,7 @@ func main() {
 	// Refused — a controller answered and would not accept this device's
 	// credentials. Orange like disconnected, since it is a link problem, but
 	// alternating odd and even LEDs, so it reads differently: this one the
-	// owner can fix, by holding the action button 5 s to pair.
+	// owner can fix, by holding the action button 7 s to pair.
 	controlClient.OnRefused(func() {
 		s.StopAnim()
 		if pulseKind == "refused" {

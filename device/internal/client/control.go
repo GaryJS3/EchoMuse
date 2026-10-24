@@ -128,8 +128,9 @@ type ControlClient struct {
 	wifiScanCallback      StateCallback
 	listenCallback        ListenCallback
 
-	conn   *websocket.Conn
-	connMu sync.Mutex
+	conn    *websocket.Conn
+	connTLS bool // conn is over wss; guarded by connMu
+	connMu  sync.Mutex
 
 	// features is what the CONTROLLER announced on the ack. Guarded by its
 	// own mutex rather than connMu: HasFeature is read on the scanner's
@@ -547,7 +548,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	plan := dialPlan(creds.tlsConf != nil, server.TLSPort, pairing)
 	if len(plan) == 0 {
 		// A CA and no TLS listener: plain would be a downgrade (pairing.go).
-		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 5s to pair", server.Addr)
+		return false, fmt.Errorf("CA installed but %s advertises no tls_port — not dialling plain; hold the action button 7s to pair", server.Addr)
 	}
 
 	var conn *websocket.Conn
@@ -715,10 +716,12 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 
 	c.connMu.Lock()
 	c.conn = conn
+	c.connTLS = attempt.tls
 	c.connMu.Unlock()
 	defer func() {
 		c.connMu.Lock()
 		c.conn = nil
+		c.connTLS = false
 		c.connMu.Unlock()
 	}()
 
@@ -1280,8 +1283,9 @@ func capabilities() []string {
 	// to the voice plane before it is mixed with music (#636).
 	//
 	// "pairing": this firmware asks to pair itself when its owner holds the
-	// action button 5 s (pairing.go). Without it the controller offers the
-	// admin a Pair action instead, since the device cannot ask.
+	// action button 7 s while not on the encrypted link (pairing.go).
+	// Without it the controller offers the admin a Pair action instead,
+	// since the device cannot ask.
 	//
 	// "ble_connect": this firmware can hold Bluetooth LE connections for the
 	// controller and speak GATT over them (#656), exchanging requests and
