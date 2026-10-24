@@ -28,6 +28,10 @@ on:
     branches: [main]
     paths:
       - 'controller/**'
+      # An EA release-prep commit touches only the channel (its notes live
+      # there since #1023), and a release refuses a commit with no image:
+      # ff06544, 2.27.0-ea.2's, had to be built by hand.
+      - 'controller-ea/**'
       - '.github/workflows/controller-build.yml'
   workflow_dispatch:
 
