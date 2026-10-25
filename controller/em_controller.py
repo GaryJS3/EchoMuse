@@ -4423,7 +4423,25 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 return False
             await _run_post_turn_playback(_d, pcm_bytes)
             return not _d.cancel_event.is_set()
-        em_external_voice.backend.register_device(device_id, _standalone_play, tone=_feedback_play)
+        async def _acknowledgement_turn(opened, _d=_device_ref) -> None:
+            # A bounded external-backend window owns the deadline and repeats
+            # this single turn after unrelated speech. Never route through HA.
+            if _d.muted:
+                return
+            _d.cancel_event.clear()
+            _d.last_wake = None
+            _d.oww_paused.set()
+            _d.oww_paused_since = asyncio.get_event_loop().time()
+            try:
+                await _d.mic_stop()
+                await _d.mic_start_turn()
+                await opened()
+                await _run_voice_locked(_d, trigger_label="acknowledgement", is_wakeword=False)
+            finally:
+                await _d.mic_stop()
+                await _d.mic_start()
+        em_external_voice.backend.register_device(device_id, _standalone_play, tone=_feedback_play,
+                                                  listen=_acknowledgement_turn)
         async def _send_volume_set(level: int, _d=_device_ref) -> None:
             await _d.send_control({"type": "volume_set", "level": level})
         async def _ring_alarm(_d=_device_ref) -> None:

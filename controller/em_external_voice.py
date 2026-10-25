@@ -73,10 +73,20 @@ class Turn:
     maximum_quiet: float = 1.0
     input_end: asyncio.Event = field(default_factory=asyncio.Event)
     last_speech_bytes: int = 0
+    acknowledgement_request: str | None = None
 
     def message(self, kind, **values):
         return dict(type=kind, sessionId=self.session_id,
                     deviceId=self.device.device_id, **values)
+
+
+@dataclass
+class AcknowledgementWindow:
+    request_id: str
+    owner: object
+    task: object = None
+    acknowledged: bool = False
+    started: bool = False
 
 
 class ExternalVoiceBackend:
@@ -88,18 +98,23 @@ class ExternalVoiceBackend:
         self.plays = {}
         self._play_callbacks = {}
         self._tone_callbacks = {}
+        self._listen_callbacks = {}
+        self.listens = {}
         self.get_device = lambda device_id: None
         self.persist = None
 
-    def register_device(self, device_id, play, tone=None):
+    def register_device(self, device_id, play, tone=None, listen=None):
         self._play_callbacks[device_id] = play
         if tone is not None:
             self._tone_callbacks[device_id] = tone
+        if listen is not None:
+            self._listen_callbacks[device_id] = listen
 
     def device_gone(self, device_id):
         self.cancel_voice_turn(device_id, reason="disconnect")
         self._play_callbacks.pop(device_id, None)
         self._tone_callbacks.pop(device_id, None)
+        self._listen_callbacks.pop(device_id, None)
 
     def claim(self, client):
         if self.client is not None:
@@ -118,7 +133,7 @@ class ExternalVoiceBackend:
         for turn in turns:
             if turn.owner is client:
                 self.cancel_voice_turn(turn.device.device_id, reason="disconnect")
-        tasks = tuple(self.plays.values())
+        tasks = tuple(self.plays.values()) + tuple(window.task for window in self.listens.values())
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -153,6 +168,9 @@ class ExternalVoiceBackend:
             raise
 
     def cancel_voice_turn(self, device_id, reason="cancelled", **unused):
+        window = self.listens.get(device_id)
+        if window is not None and window.task is not asyncio.current_task():
+            window.task.cancel()
         for (_, target), task in tuple(self.plays.items()):
             if target == device_id:
                 task.cancel()
@@ -172,6 +190,12 @@ class ExternalVoiceBackend:
         if self.has_turn(device.device_id):
             raise RuntimeError("device already has an external turn")
         turn = Turn(device, self.client)
+        if trigger_label == "acknowledgement":
+            window = self.listens.get(device.device_id)
+            if window is None or window.owner is not self.client:
+                raise RuntimeError("acknowledgement window is closed")
+            turn.acknowledgement_request = window.request_id
+            wake = None
         turn.response = asyncio.get_running_loop().create_future()
         self.turns[turn.session_id] = turn
         started = time.monotonic()
@@ -251,6 +275,8 @@ class ExternalVoiceBackend:
                                    ("threshold", "wakeThreshold"), ("noise_floor", "noiseFloor")):
                 if source in wake:
                     info[target] = wake[source]
+        if turn.acknowledgement_request is not None:
+            info["acknowledgementRequestId"] = turn.acknowledgement_request
         await self.send(turn.owner, turn.message("turn_start", **info))
         log.info("[%s] External session %s started: %s", turn.device.device_id, turn.session_id, trigger)
         reason = await asyncio.wait_for(self._input(turn, discard), INPUT_TIMEOUT)
@@ -262,6 +288,9 @@ class ExternalVoiceBackend:
         turn.phase = "thinking"
         await on_thinking()
         message = await turn.response
+        if message["type"] == "turn_acknowledgement":
+            turn.outcome = "acknowledged" if message["acknowledged"] else "ignored"
+            return
         if message["type"] == "turn_error":
             log.warning("[%s] External session %s error: %r", turn.device.device_id,
                         turn.session_id, message.get("message", "")[:MAX_ERROR])
@@ -372,6 +401,34 @@ class ExternalVoiceBackend:
             raise ValueError("message must be an object")
         kind = _string(message, "type")
         device_id = _string(message, "deviceId")
+        if kind in ("listen_for_acknowledgement", "stop_acknowledgement_listen"):
+            if owner is not self.client or not self.ready:
+                raise ValueError("external backend does not own this connection")
+            request_id = _string(message, "requestId")
+            window = self.listens.get(device_id)
+            if kind == "stop_acknowledgement_listen":
+                if window is not None and window.request_id == request_id and window.owner is owner:
+                    window.task.cancel()
+                return
+            duration = message.get("durationMs")
+            if type(duration) is not int or not 1 <= duration <= 30000:
+                raise ValueError("invalid acknowledgement duration")
+            import em_voice_backend
+            device = self.get_device(device_id)
+            if (em_voice_backend.name() != "external" or device is None
+                    or getattr(device, "muted", False) or device_id not in self._listen_callbacks
+                    or window is not None or device.voice_lock.locked() or self.has_turn(device_id)
+                    or any(target == device_id for _, target in self.plays)
+                    or len(self.turns) + len(self.plays) + len(self.listens) >= MAX_SESSIONS):
+                await self.send(owner, dict(type="acknowledgement_listen_result", deviceId=device_id,
+                                           requestId=request_id, status="rejected"))
+                return
+            window = AcknowledgementWindow(request_id, owner)
+            self.listens[device_id] = window
+            window.task = asyncio.create_task(self._listen(device, window, duration / 1000))
+            window.task.add_done_callback(lambda done: self.listens.pop(device_id, None)
+                                          if self.listens.get(device_id) is window else None)
+            return
         if kind in ("turn_input_policy", "turn_input_end"):
             session_id = _string(message, "sessionId")
             turn = self.turns.get(session_id)
@@ -447,7 +504,7 @@ class ExternalVoiceBackend:
                     turn.feedback_request = None
             task.add_done_callback(cleanup)
             return
-        if kind in ("turn_response", "turn_error", "turn_cancel"):
+        if kind in ("turn_response", "turn_error", "turn_cancel", "turn_acknowledgement"):
             session_id = _string(message, "sessionId")
             turn = self.turns.get(session_id)
             if (turn is None or turn.owner is not owner or turn.device.device_id != device_id
@@ -460,6 +517,16 @@ class ExternalVoiceBackend:
                 raise ValueError("session is not awaiting a response")
             if turn.feedback_active:
                 raise ValueError("feedback playback is still active")
+            if kind == "turn_acknowledgement":
+                window = self.listens.get(device_id)
+                acknowledged = message.get("acknowledged")
+                if (window is None or window.owner is not owner
+                        or turn.acknowledgement_request != window.request_id
+                        or message.get("requestId") != window.request_id or type(acknowledged) is not bool):
+                    raise ValueError("unknown or stale acknowledgement window")
+                window.acknowledged = acknowledged
+                turn.response.set_result(dict(type=kind, acknowledged=acknowledged))
+                return
             if kind == "turn_response":
                 _url(message)
                 if not isinstance(message.get("continueConversation", False), bool):
@@ -494,6 +561,7 @@ class ExternalVoiceBackend:
             raise ValueError("only announcement playback is supported")
         url = _url(message)
         if (key in self.plays or any(target == device_id for _, target in self.plays)
+                or device_id in self.listens
                 or device.voice_lock.locked() or self.has_turn(device_id)
                 or len(self.turns) + len(self.plays) >= MAX_SESSIONS):
             raise ValueError("device or backend busy")
@@ -502,6 +570,44 @@ class ExternalVoiceBackend:
         # Cancellation before the coroutine first runs skips its finally.
         task.add_done_callback(lambda done: self.plays.pop(key, None)
                                if self.plays.get(key) is done else None)
+
+    async def _listen(self, device, window, duration):
+        status = dict(deviceId=device.device_id, requestId=window.request_id)
+        reason = "timeout"
+
+        async def opened():
+            if not window.started:
+                window.started = True
+                await self.send(window.owner, dict(type="acknowledgement_listen_result", status="started", **status))
+
+        try:
+            async with asyncio.timeout(duration):
+                while not window.acknowledged:
+                    if getattr(device, "muted", False):
+                        reason = "muted"
+                        break
+                    await self._listen_callbacks[device.device_id](opened)
+                    if not window.started:
+                        raise RuntimeError("microphone was not opened")
+                    # Reopen after unrelated speech or the ordinary no-speech timeout,
+                    # without extending the original window deadline.
+                    await asyncio.sleep(0)
+                if window.acknowledged:
+                    reason = "acknowledged"
+        except TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            reason = "cancelled"
+        except Exception as error:
+            reason = "failed"
+            log.warning("[%s] Acknowledgement listening failed (%s)", device.device_id, type(error).__name__)
+        finally:
+            if self.listens.get(device.device_id) is window:
+                self.listens.pop(device.device_id, None)
+            with contextlib.suppress(Exception):
+                if not window.started:
+                    await self.send(window.owner, dict(type="acknowledgement_listen_result", status="rejected", **status))
+                await self.send(window.owner, dict(type="acknowledgement_listen_finished", reason=reason, **status))
 
     async def _tone(self, owner, key, turn, url):
         status = dict(requestId=key[0], deviceId=key[1], sessionId=turn.session_id)
@@ -589,7 +695,7 @@ class ExternalVoiceBackend:
             await self.send(ws, dict(type="hello", protocolVersion=1,
                                      controllerVersion=controller_version, voiceBackend=voice_backend,
                                      feedbackPlayback=True, volumeControl=True,
-                                     adaptiveEndpointing=True))
+                                     adaptiveEndpointing=True, acknowledgementListening=True))
             self.ready = True
             async for incoming in ws:
                 if incoming.type != web.WSMsgType.TEXT:

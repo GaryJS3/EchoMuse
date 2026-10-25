@@ -424,7 +424,7 @@ def test_real_websocket_auth_ownership_hello_and_bad_messages(monkeypatch):
                 assert error.value.status == status
                 assert backend.client is None
             ws = await client.ws_connect("/api/voice", headers={"Authorization": "Bearer admin"})
-            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True, volumeControl=True, adaptiveEndpointing=True)
+            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True, volumeControl=True, adaptiveEndpointing=True, acknowledgementListening=True)
             assert backend.can_serve_turn("echo")
             with pytest.raises(WSServerHandshakeError) as error:
                 await client.ws_connect("/api/voice?token=admin")
@@ -459,7 +459,7 @@ def test_controller_preserves_readiness_placement_and_esphome_servers():
     assert "esphome.start_esphome_servers(" in source
     assert "await esphome.device_connected(" in source
     assert "_run_streaming_post_turn_playback(" in source
-    assert "em_external_voice.backend.register_device(device_id, _standalone_play, tone=_feedback_play)" in source
+    assert "listen=_acknowledgement_turn)" in source
     assert "stop_esphome" not in (ROOT / "em_voice_backend.py").read_text()
 
 
