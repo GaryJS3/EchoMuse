@@ -424,7 +424,7 @@ def test_real_websocket_auth_ownership_hello_and_bad_messages(monkeypatch):
                 assert error.value.status == status
                 assert backend.client is None
             ws = await client.ws_connect("/api/voice", headers={"Authorization": "Bearer admin"})
-            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True, volumeControl=True)
+            assert await ws.receive_json() == dict(type="hello", protocolVersion=1, controllerVersion="test", voiceBackend="esphome", feedbackPlayback=True, volumeControl=True, adaptiveEndpointing=True)
             assert backend.can_serve_turn("echo")
             with pytest.raises(WSServerHandshakeError) as error:
                 await client.ws_connect("/api/voice?token=admin")
@@ -741,3 +741,34 @@ def test_capture_discards_feedback_audio_but_keeps_user_speech():
         assert len(ws.messages) == 1 and ws.messages[0]["type"] == "audio"
         assert turn.audio_bytes == 2560
     asyncio.run(main())
+
+@pytest.mark.asyncio
+async def test_adaptive_input_requires_owned_session_and_rejects_new_speech():
+    backend, ws = connected()
+    device = Device()
+    turn = external.Turn(device=device, owner=ws, session_id="adaptive")
+    backend.turns[turn.session_id] = turn
+    base = dict(deviceId="echo", sessionId="adaptive")
+    with pytest.raises(ValueError):
+        await backend.handle(ws, dict(type="turn_input_policy", **base, maximumQuietMs=True))
+    with pytest.raises(ValueError):
+        await backend.handle(ws, dict(type="turn_input_policy", **base, maximumQuietMs=10000))
+    with pytest.raises(ValueError):
+        await backend.handle(Socket(), dict(type="turn_input_policy", **base, maximumQuietMs=1600))
+    await backend.handle(ws, dict(type="turn_input_policy", **base, maximumQuietMs=1600))
+    assert turn.adaptive_endpoint and turn.maximum_quiet == 1.6
+    turn.audio_bytes, turn.last_speech_bytes = 1000, 800
+    await backend.handle(ws, dict(type="turn_input_end", **base, requestId="stale", audioBytes=700))
+    assert ws.messages[-1]["accepted"] is False
+    assert not turn.input_end.is_set()
+    turn.feedback_active = True
+    await backend.handle(ws, dict(type="turn_input_end", **base, requestId="tone", audioBytes=1000))
+    assert ws.messages[-1]["accepted"] is False
+    turn.feedback_active = False
+    await backend.handle(ws, dict(type="turn_input_end", **base, requestId="current", audioBytes=1000))
+    assert ws.messages[-1]["accepted"] is True
+    assert ws.messages[-1]["requestId"] == "current"
+    assert await backend._input(turn, 0) == "speech_end"
+    turn.phase = "thinking"
+    await backend.handle(ws, dict(type="turn_input_end", **base, requestId="late", audioBytes=1000))
+    assert ws.messages[-1]["accepted"] is False

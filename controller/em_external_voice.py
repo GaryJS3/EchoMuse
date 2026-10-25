@@ -69,6 +69,10 @@ class Turn:
     feedback_active: bool = False
     feedback_request: str | None = None
     feedback_ids: set = field(default_factory=set)
+    adaptive_endpoint: bool = False
+    maximum_quiet: float = 1.0
+    input_end: asyncio.Event = field(default_factory=asyncio.Event)
+    last_speech_bytes: int = 0
 
     def message(self, kind, **values):
         return dict(type=kind, sessionId=self.session_id,
@@ -299,12 +303,16 @@ class ExternalVoiceBackend:
         device.last_utterance_pcm = None
         try:
             while True:
+                if turn.input_end.is_set():
+                    return "speech_end"
                 now = time.monotonic()
                 quiet, _ = em_turnclock.no_speech_verdict(now, started, first_audio, speech)
                 if quiet:
                     return "no_speech_timeout"
                 ended, _ = em_turnclock.ha_vad_stalled_verdict(
-                    now, speech, False, first_speech, last_speech)
+                    now, speech, False, first_speech, last_speech,
+                    grace=0.0 if turn.adaptive_endpoint else em_turnclock.HA_VAD_GRACE,
+                    fallback_silence=turn.maximum_quiet)
                 if ended:
                     return "speech_end"
                 try:
@@ -352,6 +360,8 @@ class ExternalVoiceBackend:
                         room = em_recordings.MAX_UTTERANCE_BYTES - len(capture)
                         capture.extend(payload[:max(0, room)])
                     turn.audio_bytes += len(payload)
+                    if rms >= max(3 * getattr(device, "noise_floor", 0.0), 0.004):
+                        turn.last_speech_bytes = turn.audio_bytes
                     await self.send(turn.owner, turn.message("audio", data=base64.b64encode(payload).decode("ascii")))
         finally:
             if capture:
@@ -362,6 +372,31 @@ class ExternalVoiceBackend:
             raise ValueError("message must be an object")
         kind = _string(message, "type")
         device_id = _string(message, "deviceId")
+        if kind in ("turn_input_policy", "turn_input_end"):
+            session_id = _string(message, "sessionId")
+            turn = self.turns.get(session_id)
+            if (turn is None or turn.owner is not owner or owner is not self.client
+                    or turn.device.device_id != device_id
+                    or turn.cancelled.is_set() or turn.device.cancel_event.is_set()):
+                raise ValueError("unknown, stale or closed input session")
+            if kind == "turn_input_policy":
+                if turn.phase != "listening":
+                    raise ValueError("input is no longer open")
+                limit = message.get("maximumQuietMs")
+                if type(limit) is not int or not 900 <= limit <= 2000:
+                    raise ValueError("invalid input silence limit")
+                turn.maximum_quiet = limit / 1000
+                turn.adaptive_endpoint = True
+                return
+            observed = message.get("audioBytes")
+            request_id = _string(message, "requestId")
+            accepted = (turn.phase == "listening" and turn.adaptive_endpoint and not turn.feedback_active
+                        and type(observed) is int
+                        and 0 < turn.last_speech_bytes <= observed <= turn.audio_bytes)
+            if accepted:
+                turn.input_end.set()
+            await self.send(owner, turn.message("input_end_result", requestId=request_id, accepted=accepted))
+            return
         if kind == "set_volume":
             if owner is not self.client or not self.ready:
                 raise ValueError("external backend does not own this connection")
@@ -553,7 +588,8 @@ class ExternalVoiceBackend:
             await ws.prepare(request)
             await self.send(ws, dict(type="hello", protocolVersion=1,
                                      controllerVersion=controller_version, voiceBackend=voice_backend,
-                                     feedbackPlayback=True, volumeControl=True))
+                                     feedbackPlayback=True, volumeControl=True,
+                                     adaptiveEndpointing=True))
             self.ready = True
             async for incoming in ws:
                 if incoming.type != web.WSMsgType.TEXT:
