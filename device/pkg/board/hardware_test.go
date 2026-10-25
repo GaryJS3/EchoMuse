@@ -1,6 +1,7 @@
 package board
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -99,16 +100,57 @@ func TestDonutResolvesByNameOnly(t *testing.T) {
 	if l.Playback == nil || *l.Playback != (PCMAddr{0, 6}) {
 		t.Errorf("playback %+v, want card 0 device 6", l.Playback)
 	}
-	// The capture path reads 9 channels of S24_3LE and the Dot 3 has 4 of
-	// S32_LE, so it runs without mics and the controller is told why.
-	if l.Capture != nil || len(l.Problems) != 1 || !strings.HasPrefix(l.Problems[0], "capture:") {
+	// The microphones, and the loopback that must open before them: pcm7,
+	// not pcm3's AWB_Record, whose name is a suffix of it.
+	if l.Capture == nil || *l.Capture != (PCMAddr{0, 1}) || len(l.Problems) != 0 {
 		t.Errorf("capture %+v, problems %q", l.Capture, l.Problems)
+	}
+	if l.Loopback == nil || *l.Loopback != (PCMAddr{0, 7}) || l.LoopbackRate != 48000 || l.LoopbackChs != 2 {
+		t.Errorf("loopback %+v at %d Hz x%d", l.Loopback, l.LoopbackRate, l.LoopbackChs)
+	}
+	if l.Mics.NumMics() != 4 || l.Mics.Format != S32LE || len(l.MicMutes) != 4 {
+		t.Errorf("mics %+v, mutes %q", l.Mics, l.MicMutes)
 	}
 	if l.MuteLEDGPIO != "" || l.HCI != "" {
 		t.Errorf("mute LED gpio %q, hci %q: neither is measured on the Dot 3", l.MuteLEDGPIO, l.HCI)
 	}
 	if l.Speaker.AmpSwitch != "" || l.Speaker.Volume.Unity != "255" {
 		t.Errorf("speaker %+v: the TAS2770 has no amp switch and unity at 255", l.Speaker)
+	}
+}
+
+// Opening the Dot 3's microphones before its loopback costs it the amplifier
+// until reboot, so a loopback the board states and the kernel does not list
+// leaves it with no microphones, and says so.
+func TestNoLoopbackMeansNoMicrophones(t *testing.T) {
+	root := t.TempDir()
+	if err := os.CopyFS(root, os.DirFS(donutFOS6)); err != nil {
+		t.Fatal(err)
+	}
+	pcmList := filepath.Join(root, "proc/asound/pcm")
+	b, err := os.ReadFile(pcmList)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kept []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.Contains(line, "DL1_AWB_Record") {
+			kept = append(kept, line)
+		}
+	}
+	if err := os.WriteFile(pcmList, []byte(strings.Join(kept, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l := Resolve(root, Donut)
+	if l.Capture != nil || l.Loopback != nil {
+		t.Fatalf("capture %+v, loopback %+v: neither may open", l.Capture, l.Loopback)
+	}
+	found := false
+	for _, p := range l.Problems {
+		found = found || strings.HasPrefix(p, "capture:")
+	}
+	if !found {
+		t.Errorf("the controller is not told why: %q", l.Problems)
 	}
 }
 
@@ -198,6 +240,11 @@ func TestEveryCaptureStatesItsMicArray(t *testing.T) {
 		}
 		if a.EchoRef >= 0 && (a.EchoRef < a.NumMics() || a.EchoRef >= a.Channels) {
 			t.Errorf("%s: loopback ch%d is a mic or outside the frame", b.ID, a.EchoRef)
+		}
+		// A microphone the firmware reads is one mute must silence in
+		// hardware too.
+		if len(hw.MicMutes) == 0 {
+			t.Errorf("%s: reads its microphones and states no hardware mute", b.ID)
 		}
 	}
 }

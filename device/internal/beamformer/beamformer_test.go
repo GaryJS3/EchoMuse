@@ -10,6 +10,7 @@ import (
 var (
 	biscuit     = board.BiscuitMics()
 	nChannels   = biscuit.Channels
+	byteSample  = 3
 	frameSize   = nChannels * byteSample
 	centreCh    = biscuit.Centre
 	echoRefCh   = biscuit.EchoRef
@@ -305,5 +306,36 @@ func TestArrayWithoutACentreMicrophone(t *testing.T) {
 	}
 	if got := b.OutputChannel(-1); got != 1 {
 		t.Errorf("unlocked output ch%d, want ch1", got)
+	}
+}
+
+// S32_LE carries the same 24 bits in the top three bytes of four, so a value
+// reads the same as S24_3LE does, the low byte (always 0 on the Dot 3) is
+// ignored, and extraction and decoding agree.
+func TestS32SamplesReadAsTheirTop24Bits(t *testing.T) {
+	a := board.MicArray{Channels: 4, Format: board.S32LE, Centre: -1, EchoRef: -1,
+		Perimeter: []board.Mic{{Ch: 1, Angle: 45}, {Ch: 2, Angle: 135}, {Ch: 3, Angle: 225}, {Ch: 0, Angle: 315}}}
+	b := New(a)
+	raw := make([]byte, periodFrames*4*4)
+	for f := 0; f < periodFrames; f++ {
+		for ch := 0; ch < 4; ch++ {
+			v := uint32(int32(-(ch+1))<<16)<<8 | 0x5a // 24 bits of -(ch+1)<<16, junk below
+			o := (f*4 + ch) * 4
+			raw[o], raw[o+1], raw[o+2], raw[o+3] = byte(v), byte(v>>8), byte(v>>16), byte(v>>24)
+		}
+	}
+	b.decodeChannels(raw)
+	for d, m := range a.Perimeter {
+		if got, want := b.chanBuf[d][0], -float32(m.Ch+1)/128; got != want {
+			t.Errorf("direction %d decoded %v, want %v", d, got, want)
+		}
+	}
+	mono, _ := b.Process(raw, -1, 1.0)
+	if len(mono) != periodFrames*2 {
+		t.Fatalf("%d bytes, want %d", len(mono), periodFrames*2)
+	}
+	// ch1 (the wake mic, no centre) is -(2<<16) of 2^23: -512 after 24-to-16.
+	if got := int16(uint16(mono[0]) | uint16(mono[1])<<8); got != -512 {
+		t.Errorf("ch1 extracted %d, want -512", got)
 	}
 }

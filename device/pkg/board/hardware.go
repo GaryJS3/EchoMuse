@@ -1,6 +1,7 @@
 package board
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -36,6 +37,16 @@ type Hardware struct {
 	// Mics is how Capture's frames are laid out and where each microphone
 	// sits. Unused while Capture has no name.
 	Mics MicArray
+	// Loopback is a capture of the device's own playback that must be open
+	// before Capture is, with its rate and channel count; no name when the
+	// board has none. The Dot 3's amplifier loses its clock until reboot
+	// when its microphones open first.
+	Loopback     PCM
+	LoopbackRate int
+	LoopbackChs  int
+	// MicMutes are the switches that silence the microphones in hardware,
+	// written "1" on mute and "0" on unmute beside stopping the stream.
+	MicMutes []string
 	// Routes are the codec switches that must be closed for audio to flow,
 	// and InputGains the mic input levels, written once before either PCM
 	// opens (internal/bindings/codec).
@@ -156,6 +167,23 @@ type PCM struct {
 // PCMAddr is a PCM's card and device number.
 type PCMAddr struct{ Card, Device int }
 
+// SampleFormat is how a capture frame's samples are stored. Both carry 24
+// bits: S32LE holds them in the top three bytes of four.
+type SampleFormat int
+
+const (
+	S24LE3 SampleFormat = iota // three bytes, little-endian
+	S32LE                      // four bytes, little-endian, 24 valid bits
+)
+
+// Bytes is one sample's size.
+func (f SampleFormat) Bytes() int {
+	if f == S32LE {
+		return 4
+	}
+	return 3
+}
+
 // MicArray is a capture frame's layout and the microphones in it.
 //
 // The microphones are channels 0 to NumMics-1 of every frame, so the
@@ -164,6 +192,7 @@ type PCMAddr struct{ Card, Device int }
 type MicArray struct {
 	// Channels is the number of channels in each frame.
 	Channels int
+	Format   SampleFormat
 	// Perimeter are the edge microphones in steering order, each with its
 	// angle in degrees clockwise from 12 o'clock.
 	Perimeter []Mic
@@ -207,6 +236,30 @@ var biscuitMics = MicArray{
 // BiscuitMics is biscuit's array, for tools that read biscuit's captures.
 func BiscuitMics() MicArray { return biscuitMics }
 
+// tlvMicMutes are the four codecs' ADC mutes, A: ch0/ch1 ... D: ch6. Only
+// chip A was muted until 2026-07-07, which left the wake word's ch6 hot.
+var tlvMicMutes = []string{
+	"ADC_A Left Mute", "ADC_A Right Mute",
+	"ADC_B Left Mute", "ADC_B Right Mute",
+	"ADC_C Left Mute", "ADC_C Right Mute",
+	"ADC_D Left Mute", "ADC_D Right Mute",
+}
+
+// donutMics: one microphone per corner of the top and none in the centre,
+// ch1, ch2, ch3, ch0 clockwise from the action button (tap test on 41C8,
+// 2026-10-24). The angles assume the button is at 12 o'clock midway between
+// two corners, as biscuit's 0 degrees is; confirmed against the ring is owed.
+// No loopback in the frame: the Dot 3's is its own PCM (Loopback).
+var donutMics = MicArray{
+	Channels: 4,
+	Format:   S32LE,
+	Perimeter: []Mic{
+		{Ch: 1, Angle: 45}, {Ch: 2, Angle: 135}, {Ch: 3, Angle: 225}, {Ch: 0, Angle: 315},
+	},
+	Centre:  -1,
+	EchoRef: -1,
+}
+
 // biscuitHardware: names read off VVV (FireOS 5.5.5.4) on 2026-10-04, numbers
 // as every build before this one opened them.
 var biscuitHardware = &Hardware{
@@ -219,6 +272,7 @@ var biscuitHardware = &Hardware{
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
 	Mics:        biscuitMics,
+	MicMutes:    tlvMicMutes,
 	Routes:      tlvRoutes,
 	InputGains:  tlvInputGains,
 	// Which one is fitted differs by batch (#90). Never the 2584's
@@ -249,6 +303,7 @@ var radarHardware = &Hardware{
 	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
 	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
 	Mics:       biscuitMics,
+	MicMutes:   tlvMicMutes,
 	Routes:     tlvRoutes,
 	InputGains: tlvInputGains,
 	// Only the 2540 has been seen on radar (035T, 07MU).
@@ -287,11 +342,19 @@ var donutHardware = &Hardware{
 	// The mute LED is the privacy driver's (gpio 494), lit without us, and
 	// gpio444 here is SoC pin 57 in its audio function: exporting it kills
 	// the amplifier until reboot (@shortgame11's port). So none is stated.
-	//
-	// The mics are "TDM_Capture", 4 channels of S32_LE at 16kHz, which the
-	// capture path does not read yet, so no capture is stated and the board
-	// runs button-only.
-	Playback:   PCM{Name: "DL1_Playback"},
+	Capture:  PCM{Name: "TDM_Capture"},
+	Playback: PCM{Name: "DL1_Playback"},
+	Mics:     donutMics,
+	// Stock's mixer opens it before the microphones, and so must we.
+	Loopback:     PCM{Name: "DL1_AWB_Record"},
+	LoopbackRate: 48000,
+	LoopbackChs:  2,
+	// Two TLV320AIC3101s carry the four microphones; ADC_C and ADC_D are
+	// not fitted and refuse the write.
+	MicMutes: []string{
+		"ADC_A Left Mute", "ADC_A Right Mute",
+		"ADC_B Left Mute", "ADC_B Right Mute",
+	},
 	Routes:     donutRoutes,
 	InputGains: donutInputGains,
 	// The i2c bus also lists an opt3001 at 0-0044 with no driver bound.
@@ -330,6 +393,11 @@ type Layout struct {
 	Capture     *PCMAddr // nil when not found
 	Playback    *PCMAddr
 	Mics        MicArray
+	// Loopback is nil when the board has none or it was not found;
+	// LoopbackRate and LoopbackChs are the board's.
+	Loopback                  *PCMAddr
+	LoopbackRate, LoopbackChs int
+	MicMutes                  []string
 	// LightSensors and HCI are the board's own statements, not resolved here:
 	// the sensor is looked for by internal/bindings/als, which retries, and
 	// the HCI device is opened by internal/bluetooth only when the proxy is
@@ -404,6 +472,18 @@ func Resolve(root string, b *Board) *Layout {
 	l.LEDRing = dir
 	l.Capture = pcm("capture", hw.Capture, true)
 	l.Mics = hw.Mics
+	l.MicMutes = hw.MicMutes
+	if hw.Loopback.Name != "" {
+		l.Loopback = pcm("loopback", hw.Loopback, true)
+		l.LoopbackRate, l.LoopbackChs = hw.LoopbackRate, hw.LoopbackChs
+		// Opening the microphones without it is what costs the Dot 3 its
+		// amplifier, so a loopback the board states and nobody found means
+		// no microphones at all.
+		if l.Loopback == nil && l.Capture != nil {
+			l.Capture = nil
+			note("capture", hw.Capture.Name, "", errors.New("its loopback must open first and was not found"))
+		}
+	}
 	l.Playback = pcm("playback", hw.Playback, false)
 	return l
 }

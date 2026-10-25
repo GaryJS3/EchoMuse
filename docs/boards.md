@@ -127,14 +127,17 @@ them as the second board is added.
 - **Microphone format.** The layout is the board's (`Mics`: the channel
   count, each edge microphone's channel and angle, the centre one if any, and
   a loopback channel if the frame carries one), but the samples must be the
-  Dot 2's 24-bit S24_3LE, with the microphones on channels 0 onwards. A board
+  Dot 2's S24_3LE or the Dot 3's S32_LE (24 bits in the top three bytes),
+  with the microphones on channels 0 onwards. A board
   whose capture is different states no capture PCM and runs as a speaker: no
   `mic` capability, its listening reported as degraded with the reason, and
   no voice turn from the button.
 - **The ADC mute.** Mute writes the Dot 2's eight ADC mute controls by name.
 - **The speaker's start-up order** around the amp, the volume and a board's
   hardware mute, which is shared.
-- **Start-up order.** Some boards need one PCM opened before another.
+- **Start-up order.** Some boards need one PCM opened before another. The
+  one case handled is a playback loopback opened before the microphones
+  (`Loopback`).
 - **Android services.** `stop mixer`, `stop media` and `stop ledcontroller`
   are run as they are named on the Dot 2. Amazon's button service is
   `acebutton` on FireOS 5 and `acebuttond` on FireOS 6, and both are stopped.
@@ -263,11 +266,15 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   what silences it. Routes, the speaker path and the headphone path are read
   from the unit's own `/system/vendor/etc/mixer_paths.xml`. The firmware runs
   the Dot 2's 2048-frame period on it.
-- **Microphones: not read yet.** `TDM_Capture` is 4 channels of S32_LE at
-  16kHz (24 bits used), two tlv320aic3101 on ADC_A and ADC_B; stock records
-  the playback loopback separately, `DL1_AWB_Record`, 2 channels of S16 at
-  48kHz. Until the capture path reads that layout the board runs as a
-  speaker.
+- **Microphones.** `TDM_Capture`, 4 channels of S32_LE at 16kHz (24 bits
+  used), one microphone per corner and none in the centre, on two
+  tlv320aic3101 (ADC_A and ADC_B, which are also the only mutes). The wake
+  word listens on the first corner clockwise from the action button, ch1.
+  The playback loopback is its own PCM, `DL1_AWB_Record`, 2 channels of S16
+  at 48kHz, and it **must be open before the microphones**: the other way
+  round the amplifier loses its clock until reboot. The board states it as
+  `Loopback`; if it is not found the microphones are not opened at all.
+  Echo cancellation uses the software reference for now.
 - **Light sensor.** tsl2572 on the IIO bus, `in_illuminance0_input`, which
   reads lux as a decimal. The i2c bus also lists an opt3001 with no driver
   bound.

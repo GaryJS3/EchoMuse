@@ -58,7 +58,6 @@ import (
 const (
 	// ALSA stream parameters — must match pcm_microphone.go
 	sampleRate   = 16000
-	byteSample   = 3 // S24_3LE
 	periodFrames = 512
 
 	// Smoothing constants
@@ -83,6 +82,7 @@ type Beamformer struct {
 	nDirections        int
 	nMics              int
 	frameSize          int // bytes per frame, every channel
+	sampleBytes        int // bytes per sample: 3 for S24_3LE, 4 for S32_LE
 	centreCh           int // -1 when the board has no centre microphone
 	echoRefCh          int // -1 when the frame carries no loopback
 	candidateAngles    []float64
@@ -143,7 +143,8 @@ func New(a board.MicArray) *Beamformer {
 		lockedChannel:      -1,
 		nDirections:        n,
 		nMics:              a.NumMics(),
-		frameSize:          a.Channels * byteSample,
+		frameSize:          a.Channels * a.Format.Bytes(),
+		sampleBytes:        a.Format.Bytes(),
 		centreCh:           a.Centre,
 		echoRefCh:          a.EchoRef,
 		candidateAngles:    make([]float64, n),
@@ -167,6 +168,12 @@ func New(a board.MicArray) *Beamformer {
 
 // NumMics is how many channels of each frame are microphones.
 func (b *Beamformer) NumMics() int { return b.nMics }
+
+// sampleOff is where channel ch's 24 bits start in a frame. An S32_LE sample
+// carries them in its top three bytes, so it is read as S24_3LE one byte in.
+func (b *Beamformer) sampleOff(ch int) int {
+	return ch*b.sampleBytes + b.sampleBytes - 3
+}
 
 // Lock selects the mic with the highest energy onset relative to its noise
 // floor baseline and holds it until Unlock.
@@ -436,7 +443,7 @@ func (b *Beamformer) MicChannels(raw []byte, gain float64, sel int, selected []b
 			b.micBuf[ch] = make([]byte, n)
 		}
 		out[ch] = b.micBuf[ch][:n]
-		extractInto(out[ch], raw, b.frameSize, ch, gain)
+		extractInto(out[ch], raw, b.frameSize, b.sampleOff(ch), gain)
 	}
 	return out
 }
@@ -468,14 +475,14 @@ func (b *Beamformer) bandDiff() {
 	}
 }
 
-// decodeChannels decodes every perimeter channel from a raw S24_3LE period
+// decodeChannels decodes every perimeter channel from a raw period
 // into chanBuf as float32 normalised to [-1, 1]. Reuses chanBuf across
 // periods (§3.5) — every element is overwritten, no clearing needed.
 func (b *Beamformer) decodeChannels(raw []byte) {
 	for i := 0; i < periodFrames; i++ {
 		base := i * b.frameSize
 		for ci := 0; ci < b.nDirections; ci++ {
-			offset := base + b.directionToChannel[ci]*byteSample
+			offset := base + b.sampleOff(b.directionToChannel[ci])
 			b.chanBuf[ci][i] = decodeS24Sample(raw[offset], raw[offset+1], raw[offset+2])
 		}
 	}
@@ -506,15 +513,15 @@ func decodeS24Sample(b0, b1, b2 byte) float32 {
 // range are clamped and counted in clippedSamples.
 func (b *Beamformer) extractChannel(raw []byte, ch int, gain float64) []byte {
 	out := make([]byte, len(raw)/b.frameSize*2)
-	b.clippedSamples += extractInto(out, raw, b.frameSize, ch, gain)
+	b.clippedSamples += extractInto(out, raw, b.frameSize, b.sampleOff(ch), gain)
 	return out
 }
 
 // extractInto is extractChannel's conversion into a buffer the caller owns
 // (len(raw)/frameSize samples), returning how many samples it clamped.
-func extractInto(out, raw []byte, frameSize, ch int, gain float64) (clipped uint64) {
+// offset0 is the channel's sampleOff.
+func extractInto(out, raw []byte, frameSize, offset0 int, gain float64) (clipped uint64) {
 	n := len(raw) / frameSize
-	offset0 := ch * byteSample
 	gainQ := int64(gain*4096.0 + 0.5)
 	for i := 0; i < n; i++ {
 		base := i*frameSize + offset0
