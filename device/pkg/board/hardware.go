@@ -33,6 +33,9 @@ type Hardware struct {
 	// the firmware cannot read yet: it runs without them, button-only.
 	Capture  PCM
 	Playback PCM
+	// Mics is how Capture's frames are laid out and where each microphone
+	// sits. Unused while Capture has no name.
+	Mics MicArray
 	// Routes are the codec switches that must be closed for audio to flow,
 	// and InputGains the mic input levels, written once before either PCM
 	// opens (internal/bindings/codec).
@@ -153,6 +156,57 @@ type PCM struct {
 // PCMAddr is a PCM's card and device number.
 type PCMAddr struct{ Card, Device int }
 
+// MicArray is a capture frame's layout and the microphones in it.
+//
+// The microphones are channels 0 to NumMics-1 of every frame, so the
+// canceller can keep one filter per microphone indexed by channel; anything
+// after them is not a microphone (biscuit's loopback).
+type MicArray struct {
+	// Channels is the number of channels in each frame.
+	Channels int
+	// Perimeter are the edge microphones in steering order, each with its
+	// angle in degrees clockwise from 12 o'clock.
+	Perimeter []Mic
+	// Centre is the centre microphone's channel, the one the wake word
+	// listens on by default; -1 when the board has none.
+	Centre int
+	// EchoRef is a channel carrying the device's own playback in the same
+	// frame as the microphones, -1 when there is none.
+	EchoRef int
+}
+
+// Mic is a microphone's channel and its angle.
+type Mic struct {
+	Ch    int
+	Angle float64
+}
+
+// NumMics is how many channels of each frame are microphones.
+func (a MicArray) NumMics() int {
+	n := len(a.Perimeter)
+	if a.Centre >= 0 {
+		n++
+	}
+	return n
+}
+
+// biscuitMics: six edge microphones at r=36mm 60 degrees apart, offset 30
+// degrees from 12 o'clock, a centre one on ch6, and ch7/ch8 a stereo loopback
+// of the playback of which only the right reaches the driver (measured
+// 2026-08-29, SETUP.md's mic array section). Confirmed by tone injection,
+// 2026-05; radar's tap test (2026-10-23) found the same order.
+var biscuitMics = MicArray{
+	Channels: 9,
+	Perimeter: []Mic{
+		{0, 330}, {1, 30}, {2, 90}, {3, 150}, {4, 210}, {5, 270},
+	},
+	Centre:  6,
+	EchoRef: 8,
+}
+
+// BiscuitMics is biscuit's array, for tools that read biscuit's captures.
+func BiscuitMics() MicArray { return biscuitMics }
+
 // biscuitHardware: names read off VVV (FireOS 5.5.5.4) on 2026-10-04, numbers
 // as every build before this one opened them.
 var biscuitHardware = &Hardware{
@@ -164,6 +218,7 @@ var biscuitHardware = &Hardware{
 	MuteLEDGPIO: "444",
 	Capture:     PCM{Name: "TLV320AIC3101 Capture", Fallback: &PCMAddr{0, 24}},
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
+	Mics:        biscuitMics,
 	Routes:      tlvRoutes,
 	InputGains:  tlvInputGains,
 	// Which one is fitted differs by batch (#90). Never the 2584's
@@ -193,6 +248,7 @@ var radarHardware = &Hardware{
 	LEDRing:    I2C{Driver: "is31fl3236"},
 	Capture:    PCM{Name: "TLV320AIC3101 Capture"},
 	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
+	Mics:       biscuitMics,
 	Routes:     tlvRoutes,
 	InputGains: tlvInputGains,
 	// Only the 2540 has been seen on radar (035T, 07MU).
@@ -273,6 +329,7 @@ type Layout struct {
 	MuteLEDGPIO string
 	Capture     *PCMAddr // nil when not found
 	Playback    *PCMAddr
+	Mics        MicArray
 	// LightSensors and HCI are the board's own statements, not resolved here:
 	// the sensor is looked for by internal/bindings/als, which retries, and
 	// the HCI device is opened by internal/bluetooth only when the proxy is
@@ -346,6 +403,7 @@ func Resolve(root string, b *Board) *Layout {
 	note("led ring", hw.LEDRing.Driver, dir, err)
 	l.LEDRing = dir
 	l.Capture = pcm("capture", hw.Capture, true)
+	l.Mics = hw.Mics
 	l.Playback = pcm("playback", hw.Playback, false)
 	return l
 }

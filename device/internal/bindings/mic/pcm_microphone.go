@@ -17,7 +17,7 @@ import (
 	pkgmic "github.com/wilbowes/EchoMuse/pkg/mic"
 )
 
-// rawTap receives every raw 9-channel batch, and is nil in release builds.
+// rawTap receives every raw capture batch, and is nil in release builds.
 // Only rawtap_bench.go sets it (build tag bench): it records the mics to
 // disk, which release firmware must be unable to do.
 var rawTap func([]byte)
@@ -34,12 +34,13 @@ type PcmMicrophone struct {
 // the permanent ALSA read loop.
 func NewMicrophone() (*PcmMicrophone, error) {
 	// The capture PCM is found by name (pkg/board), never by device number.
-	capture := board.CurrentLayout().Capture
+	layout := board.CurrentLayout()
+	capture := layout.Capture
 	if capture == nil {
 		return nil, errors.New("no microphone this firmware can read on this board")
 	}
 	device := tinyalsa.NewDevice(capture.Card, capture.Device, pcm.Config{
-		Channels:    9,
+		Channels:    layout.Mics.Channels,
 		SampleRate:  16000,
 		PeriodSize:  512,
 		PeriodCount: 5,

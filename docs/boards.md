@@ -124,11 +124,13 @@ These are still written for the Dot 2 inside the drivers. A board that
 differs in any of them needs code, and the description will grow to hold
 them as the second board is added.
 
-- **Microphone format and layout.** The pipeline expects 9 channels of 24-bit
-  audio: six mics around the edge, one in the centre, and two channels of
-  playback loopback. A board whose capture is different states no capture
-  PCM and runs as a speaker: no `mic` capability, its listening reported as
-  degraded with the reason, and no voice turn from the button.
+- **Microphone format.** The layout is the board's (`Mics`: the channel
+  count, each edge microphone's channel and angle, the centre one if any, and
+  a loopback channel if the frame carries one), but the samples must be the
+  Dot 2's 24-bit S24_3LE, with the microphones on channels 0 onwards. A board
+  whose capture is different states no capture PCM and runs as a speaker: no
+  `mic` capability, its listening reported as degraded with the reason, and
+  no voice turn from the button.
 - **The ADC mute.** Mute writes the Dot 2's eight ADC mute controls by name.
 - **The speaker's start-up order** around the amp, the volume and a board's
   hardware mute, which is shared.

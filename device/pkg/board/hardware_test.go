@@ -166,6 +166,42 @@ func TestEveryBoardStatesItsBassBand(t *testing.T) {
 	}
 }
 
+// A board that reads its mics states an array the canceller and the
+// beamformer can index by channel: microphones first and contiguous, each
+// channel once, the loopback after them.
+func TestEveryCaptureStatesItsMicArray(t *testing.T) {
+	for _, b := range Known {
+		hw := b.Hardware
+		if hw.Capture.Name == "" {
+			continue
+		}
+		a := hw.Mics
+		if len(a.Perimeter) == 0 || a.Channels < a.NumMics() {
+			t.Fatalf("%s: mic array %+v", b.ID, a)
+		}
+		seen := map[int]bool{}
+		chans := []int{}
+		for _, m := range a.Perimeter {
+			chans = append(chans, m.Ch)
+			if m.Angle < 0 || m.Angle >= 360 {
+				t.Errorf("%s: ch%d at %v degrees", b.ID, m.Ch, m.Angle)
+			}
+		}
+		if a.Centre >= 0 {
+			chans = append(chans, a.Centre)
+		}
+		for _, c := range chans {
+			if c < 0 || c >= a.NumMics() || seen[c] {
+				t.Errorf("%s: mic channel %d is not one of 0-%d once", b.ID, c, a.NumMics()-1)
+			}
+			seen[c] = true
+		}
+		if a.EchoRef >= 0 && (a.EchoRef < a.NumMics() || a.EchoRef >= a.Channels) {
+			t.Errorf("%s: loopback ch%d is a mic or outside the frame", b.ID, a.EchoRef)
+		}
+	}
+}
+
 // The names decide, not the numbers: the same parts enumerated in another
 // order resolve to wherever they now are.
 func TestPartsAreFoundWhereverTheyEnumerate(t *testing.T) {
