@@ -16,18 +16,19 @@ suite deliberately keeps out. The handler wiring is a two-line call into
 this function on each of the two write paths.
 """
 
-import re
 from pathlib import Path
 
 import pytest
+
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _load_dropped_keys():
     """
-    Extract _dropped_keys from em_api source and exec it in isolation.
-    Importing em_api would drag in aiohttp/openwakeword; the function is
+    Extract dropped_keys from em_device_config's source and exec it in
+    isolation. Importing that module drags in em_esphome; the function is
     self-contained (stdlib only), so this keeps the test honest without the
     dependency weight.
 
@@ -37,16 +38,12 @@ def _load_dropped_keys():
     which is exactly why the separate decorator-placement tests below exist.
     """
     import ast
-    src = (CONTROLLER / "em_api.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_dropped_keys":
-            node.decorator_list = []
-            mod = ast.Module(body=[node], type_ignores=[])
-            ns: dict = {}
-            exec(compile(ast.fix_missing_locations(mod), "<em_api>", "exec"), ns)
-            return ns["_dropped_keys"]
-    raise AssertionError("could not locate _dropped_keys in em_api.py")
+    _, node = _sources.find_def("dropped_keys")
+    node.decorator_list = []
+    mod = ast.Module(body=[node], type_ignores=[])
+    ns: dict = {}
+    exec(compile(ast.fix_missing_locations(mod), "<em_device_config>", "exec"), ns)
+    return ns["dropped_keys"]
 
 
 dropped_keys = _load_dropped_keys()
@@ -113,11 +110,8 @@ def test_both_write_paths_are_guarded(path, handler):
     Both endpoints replace rather than merge, so both need the check. A
     guard on only one would leave the identical trap open next door.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    m = re.search(rf"async def {handler}\(.*?(?=\nasync def )", src, re.S)
-    assert m, f"could not locate {handler}"
-    body = m.group(0)
-    assert "_dropped_keys(" in body, f"{handler} does not call _dropped_keys"
+    body = _sources.code_only(_sources.def_source(handler))
+    assert "dropped_keys(" in body, f"{handler} does not call dropped_keys"
     assert "would_drop_keys" in body, f"{handler} does not refuse the write"
 
 
@@ -143,16 +137,14 @@ def test_new_default_key_does_not_block_a_stale_dashboard_save():
 
 def test_guard_reads_raw_stored_config_not_the_underlaid_view():
     """The guard must call the raw accessor, or the false positive returns."""
-    src = (CONTROLLER / "em_api.py").read_text()
-    m = re.search(r"async def _post_global_config\(.*?(?=\nasync def )", src, re.S)
-    assert m
-    assert "get_global_device_config_raw" in m.group(0)
+    code = _sources.code_only(_sources.def_source("_post_global_config"))
+    assert "get_global_device_config_raw" in code
 
 
 # ── decorator-placement guards ────────────────────────────────────────────
 #
 # Inserting a helper immediately above an already-decorated handler silently
-# steals its decorator: on 2026-07-20 `_dropped_keys` was written directly
+# steals its decorator: on 2026-07-20 `dropped_keys` was written directly
 # under `@auth.require_admin`, so the decorator bound to the helper instead
 # and `_post_global_config` was left with NO admin requirement — an auth
 # bypass on a config-write endpoint. It surfaced only as a 500 in live
@@ -163,22 +155,14 @@ def test_guard_reads_raw_stored_config_not_the_underlaid_view():
 # text, which drops decorators entirely, so they were exercising a different
 # function than production. These parse the real file instead.
 
-def _ast_tree():
-    import ast
-    return ast.parse((CONTROLLER / "em_api.py").read_text())
-
-
 def _decorators_of(name):
-    import ast
-    for n in ast.walk(_ast_tree()):
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
-            return [getattr(d, "id", getattr(d, "attr", "?")) for d in n.decorator_list]
-    raise AssertionError(f"{name} not found in em_api.py")
+    _, n = _sources.find_def(name)
+    return [getattr(d, "id", getattr(d, "attr", "?")) for d in n.decorator_list]
 
 
 def test_dropped_keys_is_a_plain_helper_not_a_route_handler():
-    assert _decorators_of("_dropped_keys") == [], (
-        "_dropped_keys has picked up a decorator — it is a pure helper. This "
+    assert _decorators_of("dropped_keys") == [], (
+        "dropped_keys has picked up a decorator — it is a pure helper. This "
         "means it was inserted directly beneath a decorated handler and stole "
         "that decorator."
     )

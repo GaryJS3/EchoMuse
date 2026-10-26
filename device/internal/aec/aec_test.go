@@ -5,7 +5,11 @@ import (
 	"encoding/binary"
 	"math"
 	"testing"
+	"time"
 )
+
+// NumMics is biscuit's microphone count, which every test here cancels.
+const NumMics = 7
 
 // synth generates deterministic voice-band-ish noise at 16kHz mono.
 func synth(n int) []int16 {
@@ -56,7 +60,7 @@ func TestCancellerConvergesOnAlignedEcho(t *testing.T) {
 	const frames = 120 // ~3.8s of audio
 	delaySamples := delayMs * sampleRate / 1000
 
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, delayMs, 200)
 
 	signal := synth(frames * FrameSize)
@@ -109,7 +113,7 @@ func TestGovernorRecoversFromMicGap(t *testing.T) {
 	const preGap, gap, postGap = 60, 31, 60 // frames; gap ≈ 1s of mic downtime
 	delaySamples := delayMs * sampleRate / 1000
 
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, delayMs, 200)
 
 	signal := synth((preGap + gap + postGap) * FrameSize)
@@ -177,7 +181,7 @@ func TestHardwareShapedBuffers(t *testing.T) {
 	const delayMs = 0
 	const batches = 40 // ~6.4s
 
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, delayMs, 300)
 
 	signal := synth(batches * batch)
@@ -220,7 +224,7 @@ func TestHardwareShapedBuffers(t *testing.T) {
 // TestDisabledPassthrough — a disabled canceller must return the input
 // untouched (same backing content) and never touch the C state.
 func TestDisabledPassthrough(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	in := make([]byte, FrameSize*2)
 	for i := range in {
 		in[i] = byte(i)
@@ -234,7 +238,7 @@ func TestDisabledPassthrough(t *testing.T) {
 // TestParamClamps — out-of-range config must clamp, not crash or allocate
 // absurd filter lengths.
 func TestParamClamps(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 99999, 99999)
 	if c.delayMs != maxDelayMs || c.tailMs != maxTailMs {
 		t.Fatalf("clamp failed: delay=%d tail=%d", c.delayMs, c.tailMs)
@@ -273,7 +277,7 @@ func TestHardwareRefCancelsWithoutRingOrDelay(t *testing.T) {
 	const frames = 120
 	const echoDelay = 33 // samples, measured on biscuit
 
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 200)
 	c.SetHardwareRef(true)
 
@@ -319,7 +323,7 @@ func TestHardwareRefCancelsWithoutRingOrDelay(t *testing.T) {
 // pushing would peg it at ringCap and leave the far-end telemetry describing a
 // buffer no cancellation ever reads.
 func TestHardwareRefIgnoresWriteFar(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 100, 200)
 	c.SetHardwareRef(true)
 
@@ -332,13 +336,36 @@ func TestHardwareRefIgnoresWriteFar(t *testing.T) {
 	}
 }
 
+// TestWriteFarDoesNotWaitOnHardwareRef: on the hardware path WriteFar runs
+// on the speaker's write loop and must not wait for the canceller's lock,
+// which the mic side holds through a whole block of cancellation (#866).
+func TestWriteFarDoesNotWaitOnHardwareRef(t *testing.T) {
+	c := New(NumMics)
+	c.SetParams(true, 0, 200)
+	c.SetHardwareRef(true)
+
+	c.mu.Lock() // the mic side, mid-block
+	done := make(chan struct{})
+	go func() {
+		c.WriteFar(to48kStereo(synth(FrameSize)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		c.mu.Unlock()
+		t.Fatal("WriteFar waited for the canceller's lock on the hardware path")
+	}
+	c.mu.Unlock()
+}
+
 // TestMissingHardwareRefPassesThrough — a caller that promises a hardware
 // reference and supplies none must not have its audio cancelled against
 // silence. That would be indistinguishable from a working AEC with nothing
 // playing, which is exactly the failure this project has already paid for
 // once (0dB cancellation, no underruns to give it away).
 func TestMissingHardwareRefPassesThrough(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 0, 200)
 	c.SetHardwareRef(true)
 
@@ -362,7 +389,7 @@ func TestMissingHardwareRefPassesThrough(t *testing.T) {
 // hardware path ran on the way out), and a stale reference is the one thing
 // that silently produces zero cancellation.
 func TestSwitchingSourcesDropsStaleRing(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 100, 200)
 
 	signal := synth(FrameSize)
@@ -384,7 +411,7 @@ func TestSwitchingSourcesDropsStaleRing(t *testing.T) {
 // the value rides every config push, so one fleet-wide edit would do it to
 // every device at once.
 func TestDelayChangeDoesNotRebuildOnTheHardwarePath(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	c.SetParams(true, 250, 300)
 	c.SetHardwareRef(true)
 	before := c.st
@@ -424,7 +451,7 @@ func TestDelayChangeDoesNotRebuildOnTheHardwarePath(t *testing.T) {
 // the stats field is sent without omitempty precisely so that ABSENT means
 // "firmware too old to say", and an empty string would collapse the two.
 func TestRefSourceNamesTheLiveReference(t *testing.T) {
-	c := New()
+	c := New(NumMics)
 	if got := c.RefSource(); got != "off" {
 		t.Fatalf("disarmed canceller: got %q, want \"off\"", got)
 	}

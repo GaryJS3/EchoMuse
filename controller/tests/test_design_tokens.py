@@ -52,6 +52,12 @@ _COMPONENT = re.compile(r"^function ([A-Z]\w*)")
 _VAR_USE = re.compile(r"var\((--[a-z0-9-]+)\)")
 _VAR_DEF = re.compile(r"^\s*(--[a-z0-9-]+)\s*:", re.M)
 
+# Hex alpha glued onto a value. Two shapes, and the second is the common one:
+# an interpolation that may or may not be a token, and a var() call with the
+# suffix pasted straight on. See test_hex_alpha_is_never_concatenated_onto_a_value.
+_ALPHA_INTERP = re.compile(r"\$\{[^}]*\}[0-9a-fA-F]{2}\b")
+_VAR_ALPHA = re.compile(r"var\(--[a-z0-9-]+\)[0-9a-fA-F]{2}\b")
+
 
 # Comments are stripped before tallying, because a GitHub issue reference is
 # not a colour: `#235` matches the 3-digit hex form exactly, so citing an
@@ -129,7 +135,12 @@ def _theme_blocks() -> dict[str, set[str]]:
 def test_every_var_is_defined():
     """A var() with no definition is invisible, not broken — it renders as
     nothing and reports nothing. This is the failure mode worth a test."""
-    defined = set().union(*_theme_blocks().values())
+    # The scale tokens (type, radius, font) are theme-independent, so they
+    # sit in their own :root block; test_design_scale.py checks that block.
+    html = HTML.read_text()
+    scale = html.index(":root {\n      --font-sans:")
+    defined = set().union(*_theme_blocks().values()) | set(
+        _VAR_DEF.findall(html[scale:html.index("\n    }", scale)]))
     used = set(_VAR_USE.findall(JSX.read_text()))
     missing = used - defined
     assert not missing, (
@@ -181,6 +192,49 @@ def test_budget_matches_reality():
         "Budget is looser than reality — re-record it to lock the cleanup "
         "in:\n" + "\n".join(sorted(stale))
         + "\n\n  python tests/test_design_tokens.py --update"
+    )
+
+
+def test_hex_alpha_is_never_concatenated_onto_a_value():
+    """A hex alpha suffix on a value that may be a token is invalid CSS, and
+    Chromium accepts it and drops it at computed-value time with NOTHING on
+    the console — so the console-error check in `uat/` cannot see it and the
+    LCD glow vanished for a release this way.
+
+    `${color}88` worked while every colour was a literal. The moment a call
+    site became `var(--lcd-green)` it produced `var(--lcd-green)88`, and
+    `test_every_var_is_defined` cannot see it either: the token is defined,
+    the var() is real, the declaration is simply discarded.
+
+    The rule is the blunt one — no hex alpha may be concatenated onto an
+    interpolated value at all — because the fragile case is not detectable by
+    looking at the interpolation: `${c}66` is only broken when `c` happens to
+    hold a var(), which no regex on this expression can see. Requiring
+    `color-mix(in srgb, X 53%, transparent)` costs one function call and takes
+    a var() correctly.
+
+    A literal hex with an alpha suffix baked in (`#00b40088`) is fine and is
+    what a value sent to hardware looks like.
+    """
+    # Fired at a canary and at the two legal forms first: a rule whose
+    # patterns have stopped matching is a green check over every call site,
+    # which is the failure this test exists to avoid repeating.
+    for caught in ("textShadow: `0 0 8px ${c}66`", "textShadow: `0 0 8px var(--ok)88`"):
+        assert _ALPHA_INTERP.search(caught) or _VAR_ALPHA.search(caught), caught
+    for legal in ("textShadow: `0 0 8px #00b40088`",
+                  "textShadow: `0 0 8px color-mix(in srgb, ${c} 40%, transparent)`"):
+        assert not (_ALPHA_INTERP.search(legal) or _VAR_ALPHA.search(legal)), legal
+
+    text = _strip_comments(JSX.read_text())
+    hits = [
+        f"  {i}: {line.strip()}"
+        for i, line in enumerate(text.split("\n"), 1)
+        if (_ALPHA_INTERP.search(line) or _VAR_ALPHA.search(line))
+    ]
+    assert not hits, (
+        "Hex alpha concatenated onto a value — use "
+        "`color-mix(in srgb, X 53%, transparent)`, which takes a var():\n"
+        + "\n".join(hits)
     )
 
 

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Params is the chain's whole configuration. Defaults match
@@ -18,6 +20,11 @@ type Params struct {
 	LimiterEnabled     bool
 	LimiterThresholdDb float64
 	LimiterReleaseMs   float64
+	// StockSound adds the board's voicing: the driver correction and the
+	// three compressor bands above the guard (#229). It has no effect on a
+	// board with no voicing. The device's volume law and order change with
+	// it; see speaker.PcmSpeaker.
+	StockSound bool
 }
 
 // DefaultParams mirrors the controller's defaults, so a device that has not
@@ -29,6 +36,9 @@ func DefaultParams() Params {
 		LimiterEnabled:     true,
 		LimiterThresholdDb: -1,
 		LimiterReleaseMs:   150,
+		// Always on for the speaker (#229); there is no key to turn it
+		// off. chainForJack clears it while a plug is in.
+		StockSound: true,
 	}
 }
 
@@ -59,7 +69,11 @@ func (p Params) String() string {
 	if p.LimiterEnabled {
 		lim = fmt.Sprintf("%gdB/%gms", math.Min(p.LimiterThresholdDb, 0), p.LimiterReleaseMs)
 	}
-	return fmt.Sprintf("eq=%s speech_boost=%s guard=%s limiter=%s", eqs, boost, guard, lim)
+	out := fmt.Sprintf("eq=%s speech_boost=%s guard=%s limiter=%s", eqs, boost, guard, lim)
+	if p.StockSound {
+		out += " stock_sound=on"
+	}
+	return out
 }
 
 // Chain runs EQ → bass guard → limiter on stereo S16_LE periods.
@@ -86,22 +100,32 @@ type Chain struct {
 
 	// Owned by the ALSA goroutine.
 	params  Params
+	voicing *board.Voicing // nil: StockSound is never in force
 	eq      eq
 	guard   *bassGuard
+	corr    correction
 	lim     *limiter
 	idle    bool // state is all zero and input is silence
 	running bool // active on the previous period
 }
 
-// New builds a chain at the given sample rate, inactive, with DefaultParams.
+// New builds a chain at the given sample rate, inactive, with DefaultParams
+// and biscuit's bass band and voicing.
 func New(sampleRate int) *Chain {
+	return NewFor(sampleRate, DefaultGuardBand, board.BiscuitVoicing())
+}
+
+// NewFor is New with the board's own bass band and voicing (nil for none).
+func NewFor(sampleRate int, band GuardBand, v *board.Voicing) *Chain {
 	fs := float64(sampleRate)
 	c := &Chain{
-		fs:    fs,
-		eq:    eq{fs: fs},
-		guard: newBassGuard(fs),
-		lim:   newLimiter(fs),
-		idle:  true,
+		fs:      fs,
+		voicing: v,
+		eq:      eq{fs: fs},
+		guard:   newBassGuard(fs, band),
+		corr:    newCorrection(fs, v),
+		lim:     newLimiter(fs),
+		idle:    true,
 	}
 	c.apply(DefaultParams())
 	return c
@@ -125,11 +149,31 @@ func (c *Chain) SetParams(p Params) {
 }
 
 func (c *Chain) apply(p Params) {
+	// Cleared rather than ignored, so everything downstream (the speaker's
+	// volume law, the log line) reads what is in force.
+	p.StockSound = p.StockSound && c.voicing != nil
 	c.params = p
 	c.eq.set(p.Bands, p.Loudness)
-	c.guard.enabled = p.GuardEnabled
+	// The voicing was tuned with the guard on, and drives the chain past
+	// full scale near the top, so the profile does not let it be turned off.
+	c.guard.enabled = p.GuardEnabled || p.StockSound
 	c.guard.floorDb = math.Min(p.GuardDb, 0)
+	if p.StockSound {
+		c.guard.floorDb = math.Min(c.guard.floorDb, c.voicing.BassFloorDb)
+	}
 	c.lim.enabled = p.LimiterEnabled
+	// The profile's extra filters start cold when it turns on (one phase
+	// step at a rare config change), and are dropped when it turns off so
+	// the default path stays bit-exact.
+	switch {
+	case p.StockSound && c.guard.upper == nil:
+		c.guard.upper = newUpperBands(c.fs, c.voicing)
+		c.guard.hold = newHoldMin(c.voicing.BassHoldMs, c.fs)
+		c.corr.reset()
+	case !p.StockSound:
+		c.guard.upper = nil
+		c.guard.hold = nil
+	}
 	c.lim.setParams(p.LimiterThresholdDb, p.LimiterReleaseMs, c.fs)
 }
 
@@ -143,8 +187,9 @@ func (c *Chain) takePending() (Params, bool) {
 	if p == nil {
 		return c.params, false
 	}
-	changed := *p != c.params
+	prev := c.params
 	c.apply(*p)
+	changed := c.params != prev
 	return c.params, changed
 }
 
@@ -161,16 +206,7 @@ func (c *Chain) Idle() bool {
 // The first return is non-nil only when a queued SetParams changed the chain
 // on this period, so the caller can log what the audio is now going through.
 func (c *Chain) Process(buf []byte) (applied *Params) {
-	if p, changed := c.takePending(); changed {
-		applied = &p
-	}
-	active := c.active.Load()
-	if active != c.running {
-		// Entering or leaving: the chain's state belongs to audio it last
-		// saw, which is not the audio arriving now. Start clean.
-		c.reset()
-		c.running = active
-	}
+	applied, active := c.beginProcess()
 	if !active {
 		return applied
 	}
@@ -187,6 +223,9 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 		x := (float64(l) + float64(r)) / 2
 
 		x = c.eq.step(x)
+		if c.params.StockSound {
+			x = c.corr.step(x)
+		}
 		x = c.guard.step(x)
 		x = c.lim.step(x)
 
@@ -218,8 +257,122 @@ func (c *Chain) Process(buf []byte) (applied *Params) {
 	return applied
 }
 
+// ProcessFloat is Process for a wide-precision interleaved stereo period.
+// fullScales contains one full-scale multiplier per frame. Samples are
+// normalised into the chain's ordinary S16 signal domain and returned to the
+// wide domain afterward. Keeping the chain's state normalised makes switching
+// between ordinary and boosted periods seamless, while the caller retains
+// headroom until the later master-volume stage.
+func (c *Chain) ProcessFloat(buf []float64, fullScales []float64) (applied *Params) {
+	applied, active := c.beginProcess()
+	if !active {
+		return applied
+	}
+
+	frames := len(buf) / 2
+	silentIn, silentOut := true, true
+	for i := 0; i < frames; i++ {
+		l, r := buf[i*2], buf[i*2+1]
+		if l != 0 || r != 0 {
+			silentIn = false
+		}
+		scale := 1.0
+		if i < len(fullScales) && fullScales[i] > 0 {
+			scale = fullScales[i]
+		}
+		x := (l + r) / (2 * scale)
+		x = c.eq.step(x)
+		if c.params.StockSound {
+			x = c.corr.step(x)
+		}
+		x = c.guard.step(x)
+		x = c.lim.step(x)
+		if x > ceiling {
+			x = ceiling
+		} else if x < -fullScale {
+			x = -fullScale
+		}
+		x *= scale
+		if math.Abs(x) >= 1 {
+			silentOut = false
+		}
+		buf[i*2], buf[i*2+1] = x, x
+	}
+	if silentIn && silentOut {
+		c.reset()
+		c.idle = true
+	} else {
+		c.idle = false
+	}
+	return applied
+}
+
+// ProcessWide runs the chain over a stereo period at its TRUE level, which
+// may exceed full scale, and writes S16 to out. It is the stock-sound
+// profile's entry point: the volume is applied BEFORE the chain there, as on
+// stock, and near the top it puts the signal over full scale on purpose for the
+// compressors and limiter to bring back. Only the chain's output is clipped.
+// len(out) must be 2*len(in) bytes (stereo S16 for stereo float).
+func (c *Chain) ProcessWide(in []float64, out []byte) (applied *Params) {
+	applied, active := c.beginProcess()
+	frames := min(len(in)/2, len(out)/4)
+	silentIn, silentOut := true, true
+	for i := 0; i < frames; i++ {
+		l, r := in[i*2], in[i*2+1]
+		if l != 0 || r != 0 {
+			silentIn = false
+		}
+		x := (l + r) / 2
+		if active {
+			x = c.eq.step(x)
+			if c.params.StockSound {
+				x = c.corr.step(x)
+			}
+			x = c.guard.step(x)
+			x = c.lim.step(x)
+		}
+		if x > ceiling {
+			x = ceiling
+		} else if x < -fullScale {
+			x = -fullScale
+		}
+		s := int16(x)
+		if s != 0 {
+			silentOut = false
+		}
+		lo, hi := byte(uint16(s)), byte(uint16(s)>>8)
+		off := i * 4
+		out[off], out[off+1], out[off+2], out[off+3] = lo, hi, lo, hi
+	}
+	if !active {
+		return applied
+	}
+	if silentIn && silentOut {
+		c.reset()
+		c.idle = true
+	} else {
+		c.idle = false
+	}
+	return applied
+}
+
+func (c *Chain) beginProcess() (applied *Params, active bool) {
+	if p, changed := c.takePending(); changed {
+		applied = &p
+	}
+	active = c.active.Load()
+	if active != c.running {
+		// Entering or leaving: the chain's state belongs to audio it last
+		// saw, which is not the audio arriving now. Start clean.
+		c.reset()
+		c.running = active
+	}
+	return applied, active
+}
+
 func (c *Chain) reset() {
 	c.eq.reset()
+	c.corr.reset()
 	c.guard.reset()
 	c.lim.reset()
 	c.idle = true

@@ -127,6 +127,11 @@ silence, not degraded behaviour.
 | V4 | user command during the turn | recorded as `pending`; **overrides** our auto-resume | last write wins | — | [today] |
 | V5 | duck released before the response finishes | — | **lifts early, competes with the tail** | — | **bug, #261** |
 
+Before the V1 mix, firmware applies `responseLevel` only to the voice plane:
+Low / Medium / High request 0 / +6 / +12dB above device volume. The effective
+boost is capped against the live device-volume ramp, so the combined gain
+cannot exceed unity and converges to no boost at maximum volume.
+
 **V5 is #261 and is unexplained.** `em_player` logs only the failure paths
 (`duck failed` / `unduck failed`), so a duck that is sent, applied, and then
 released early is completely silent in the log. Add the log line before
@@ -153,8 +158,8 @@ the whole reason the second plane exists.
 |---|---|---|---|
 | T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [today] |
 | T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [today] |
-| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [today] |
-| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [today] |
+| T3 | wake word heard while any Echo rings | every ring held silent (flush) for up to `DISMISS_LISTEN_S` + 2s while the controller listens for speech; no turn starts | [today] |
+| T4 | dismissal (button, speech after the wake word, or `CANCELLED`) | ring stops, `speaker_flush`; with no speech the hold is released and the ring resumes | [today] |
 | T5 | nobody answers | stops at `MAX_RING_S` = 15 min | [today] |
 
 `speaker_busy` is a counter rather than a flag because an announcement can
@@ -164,7 +169,7 @@ process.
 
 ---
 
-## 6. Sendspin — a second producer for the music plane **[built — EA, not yet heard on hardware]**
+## 6. Sendspin — a second producer for the music plane **[built — Early Access firmware, on hardware since 2026-10-01]**
 
 Synchronised multi-room playback via the Open Home Foundation's Sendspin
 protocol, which Music Assistant speaks natively. Placement decided 2026-08-22

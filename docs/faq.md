@@ -14,52 +14,85 @@ faults worth checking before you file, and
 ### Should I use amonet v1.1.0 or v2.0.0?
 **Either works.** v1.1.0 leaves the Echo on FireOS 5, where you can install
 emOS or keep FireOS with root. v2.0.0 moves it to FireOS 6, where EchoMuse
-offers emOS. Moving between amonet versions is part of the unlock, so follow
-R0rt1z2's XDA thread for that.
+offers emOS. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
+between them.
 
 More in [rooting](rooting.md).
 
 ### The unlock won't run on my Mac.
-**It needs Linux.** The unlock is
-[R0rt1z2's work on XDA](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/),
-not ours, and it doesn't work on macOS. A live USB is enough — the unlock is
-the only step that needs Linux. Everything after it, including the
+**Use [firebreak](rooting.md#unlocking-with-firebreak).** It runs on macOS,
+Linux and Windows. Everything after it, including the
 provisioning wizard, runs from a Chromium-based browser on any OS.
 
 ### `brick.sh` refuses with "restricted on locked hw", or `fastbrick.sh` sits at "Sending payload...".
-**Your Dot isn't on the latest FireOS.** The exploit only works on current
-firmware. amonet 2.0.0's `fastbrick.sh` can hide the refusal: one owner
-found its retry loop swallows the error, so it waits at "Sending payload..."
-instead of failing.
-A Dot whose fastboot reports LK `41fb3ce-20221007_151724` is in this state
-too. Three owners got past it by letting Amazon update it to Fire OS 6574.1
-(software version `13222530692` or later in the Alexa app) first
+**Use [firebreak](rooting.md#unlocking-with-firebreak) instead.** amonet's
+scripts pick the exploit image from the Dot's LK, which fastboot reports as
+`lk_build_desc`, and know only one FireOS 6 LK, `63cb91b-20221007_072309`.
+FireOS 6 4310, 4313 and 4315 ship `41fb3ce-20221007_151724`, which then gets
+the wrong image and refuses it. amonet 2.0.0's `fastbrick.sh` hides the
+refusal: its retry loop swallows the error, so it waits at "Sending
+payload..." instead of failing.
+
+firebreak sends the right image for every LK in
+[its table](https://github.com/bboe/firebreak#bootloaders), so the Dot does
+not need a FireOS update first. With amonet's scripts, letting Amazon update
+the Dot to FireOS 6574.1 moves it to `63cb91b`
 ([#567](https://github.com/wilbowes/EchoMuse/issues/567)).
 
-1. Pair the Dot to an Amazon account (any account — make a throwaway) so it
-   gets on WiFi.
-2. Mute it and leave it plugged in for 20–30 minutes. Muting stops wake words
-   interrupting the update. You may need two of these unattended rounds.
-3. Then say "Alexa, check for software updates" to jump it to current.
-4. Retry `brick.sh` (or `fastbrick.sh`).
+Turn **off** any file manager that auto-mounts USB devices. It grabs the
+handshake and makes later adb steps fail with unhelpful errors.
 
-Two things contributors have hit along the way: if the Alexa app won't pair a
-very old Dot, select **Echo Tap** in the app to get the old hotspot pairing
-flow; and turn **off** any file manager that auto-mounts USB devices, because
-it grabs the handshake and makes later adb steps fail with unhelpful errors.
+### fastboot sees the Dot, but `getvar` never answers (Linux).
+**Check TLP's USB autosuspend.** On a laptop running TLP, the Dot's fastboot
+device can be suspended between commands, so a query that answered once then
+times out. Add the Dot's fastboot USB ID to TLP's denylist in
+`/etc/tlp.conf` and reboot:
+
+```
+USB_DENYLIST+="0bb4:0c01"
+```
+
+`0bb4:0c01` is what one Dot reported in fastboot; check yours with `lsusb`.
+`systemctl is-active tlp` reading `inactive` does not rule this out, because
+TLP's udev helper still applies the policy
+([#697](https://github.com/wilbowes/EchoMuse/issues/697)).
+
+### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
+**The Echo has amonet v1's partition table under a v2 unlock.** Installing
+v2 is meant to put the original table back, and on this Echo it has not. The
+wizard has read and written nothing. Reinstalling FireOS does not change the
+table, so it won't help.
+
+Two owners got past it by installing amonet v2 again, as a zip from TWRP
+([#712](https://github.com/wilbowes/EchoMuse/issues/712)). **We have not run
+that ourselves and can't tell you it is safe:** it rewrites the partition
+table and the bootloader, and an Echo on which it fails partway may not
+start. Ask on the XDA thread first and quote the wizard's error line.
 
 ### Sideloading FireOS 5.5.5.4 fails with a red flash of the ring.
 Sideload it again. It generally works on the second attempt.
 
 ### Deeper questions about the unlock itself.
-Those belong on the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/).
-We link to it rather than copying it, deliberately — a copy goes stale without
-anyone noticing.
+For a failed firebreak run, run it again with `--report` and paste what it
+prints in `#support-device-unlocking` on the Discord. amonet itself is
+R0rt1z2's work, and the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) is the reference for it.
 
 ### Did I brick it?
 **Probably not permanently.** A Dot stuck in preloader is usually
 recoverable — see the recovery notes on the XDA thread. Don't flash anything
 else at it until you've asked.
+
+### The Dot boot-loops on one computer but not on another.
+**The USB port can't power it.** The Dot draws the most as it enters TWRP,
+when the ring turns bright white, and a weak port lets it brown out and
+restart. Its own adapter supplies 9 W (5.2 V at 1.8 A); a computer's
+USB 2.0 port need supply only 2.5 W (0.5 A).
+
+To confirm a lack of power, boot into TWRP on a wall charger rated 1.8 A
+or more. A charger carries no data, so it cannot finish the unlock, but a Dot that
+stops looping on it has a power problem. Then finish from another computer.
+One owner's Dot looped on a desktop's ports, reached TWRP at once on a
+charger, and finished from a different computer.
 
 ---
 
@@ -87,6 +120,20 @@ some other address does not cover it.
 drops the bus — roughly every six seconds, with `device firmware changed` in
 `dmesg` each time. Forcing it to `adb` alone fixes it. Nothing EchoMuse does
 needs MTP.
+
+**On a Linux desktop, try the computer side first.** GNOME's MTP monitor
+probes the Echo's MTP interface, and that is what resets the link. Stop it,
+then unplug and replug the Echo:
+
+```sh
+systemctl --user stop gvfs-mtp-volume-monitor
+systemctl --user mask --runtime gvfs-mtp-volume-monitor
+```
+
+The monitor restarts itself on demand, so `stop` alone does not hold; the
+mask lasts until the computer reboots. This fixed it for two owners on
+Ubuntu, both at the end of the unlock and in the wizard. Windows is not
+affected.
 
 **`setprop` from a booted device will not work.** Android's property service
 refuses that specific property whatever `ro.secure` and `ro.debuggable` say
@@ -130,12 +177,33 @@ thread if not ([#619](https://github.com/wilbowes/EchoMuse/issues/619),
 image puts the boot partition back from TWRP if you need to start over.
 
 ### Connect Console fails on Linux.
-Two Linux users with Chromium have hit this and it isn't root-caused yet
-([#605](https://github.com/wilbowes/EchoMuse/issues/605)). Our guess is
-another program holding the Echo's serial port. ModemManager probes new USB
-serial devices on many distributions, so try `sudo systemctl stop
-ModemManager` and `adb kill-server` before clicking Connect Console. If it
-still fails, open the console yourself (below) and finish the WiFi step there.
+"Failed to open serial port" in the wizard means the browser was refused the
+Echo's serial port by your computer; the Echo has booted emOS and is waiting
+for WiFi. Three Linux users with Chromium have hit it
+([#605](https://github.com/wilbowes/EchoMuse/issues/605),
+[#767](https://github.com/wilbowes/EchoMuse/issues/767),
+[#810](https://github.com/wilbowes/EchoMuse/issues/810)), and one on Fedora
+got past it by joining the group that owns the port:
+
+```
+sudo usermod -aG dialout $USER     # then log out and back in
+```
+
+ModemManager also probes new USB serial devices on many distributions, so
+run `sudo systemctl stop ModemManager` and `adb kill-server` before clicking
+Connect Console. If it still fails, open the console yourself (below) and
+finish the WiFi step there.
+
+### After the reboot into emOS the ring sits blue, or part of it turns red.
+**The Echo has booted emOS and is waiting for WiFi.** A blue ring with a
+brighter segment throbbing means it has no network saved yet, which is where
+every new install stops until the wizard's WiFi step. Red means a saved
+network did not connect within two minutes. Neither is a failed flash.
+
+If the wizard can't open the console to finish, open it yourself (below) and
+run `em-wifi`: it scans, you pick a network by number and type the password
+([#810](https://github.com/wilbowes/EchoMuse/issues/810),
+[#825](https://github.com/wilbowes/EchoMuse/issues/825)).
 
 ---
 
@@ -176,6 +244,10 @@ VLANs. Put them on the same network, or give the Echo a
 To check, open the console and run `tail -n 40 /tmp/server.log`: repeated
 `mDNS: no server found` lines mean discovery is what's failing.
 
+With a static endpoint the firewall still has to let the Echo open TCP 8767
+and 8770 on the controller (the default ports). An mDNS relay between the VLANs was not enough
+for one owner ([#827](https://github.com/wilbowes/EchoMuse/issues/827)).
+
 ### No sound on emOS with FireOS 6.
 Update the controller to **2.24.1** and the device to **v2.16.0**. Earlier
 firmware left part of the speaker path switched off on FireOS 6's kernel
@@ -184,7 +256,7 @@ firmware left part of the speaker path switched off on FireOS 6's kernel
 ### How do I update emOS?
 Open the Echo in the dashboard and go to **Updates**. An Echo on emOS has an
 **emOS** panel there with the version it runs and the newest release; press
-**Update**. This needs a controller newer than 2.25.0 and installs emOS 0.10
+**Update**. This needs controller 2.26.0 or later and installs emOS 0.10
 or later. On an older controller, re-run the wizard's build and flash steps
 instead.
 
@@ -299,6 +371,18 @@ missing is running more than one wake word model at a time. Tracked as
 See [#210](https://github.com/wilbowes/EchoMuse/issues/210) — and please add
 your setup, that one needs more reports than it has.
 
+### The Echo shows up twice in Music Assistant.
+With **Sendspin player** on, Music Assistant lists the Echo once as its
+Sendspin player and once as its Home Assistant media player. Hide the Home
+Assistant one inside Music Assistant. Home Assistant keeps it for replies and
+announcements.
+
+### Replies fail with "Cannot connect to host homeassistant.local".
+**Set Home Assistant's local URL to its IP address.** The controller fetches
+reply audio from the address in that URL, and a `.local` name does not
+resolve on every network. It is under **Settings → System → Network → Home
+Assistant URL**.
+
 ### The device isn't offered as a target for "start a conversation".
 **Update the controller.** `assist_satellite.start_conversation` and
 `assist_satellite.ask_question` are both supported, attention chime included.
@@ -318,6 +402,16 @@ In order:
 3. Try a different model. The stock openWakeWord models vary a lot in how well
    they suit a given voice.
 
+If it never wakes at all but the action button works, the centre microphone
+may have failed: the wake word listens on that one alone. **Config →
+Microphones → Advanced → Wake word microphone** moves it to one of the six
+around the edge ([#705](https://github.com/wilbowes/EchoMuse/issues/705)).
+That is firmware v2.18.0 (Early Access from v2.18.0-ea.2).
+
+If it scores the wake word on the device, check the device's **Updates** tab.
+Where **On-device wake word** reads *Out of date* or *Not installed*, press
+the button beside it, then restart the device.
+
 If it still misses at normal speaking distance in a quiet room, that's worth a
 report with the model name and the distance.
 
@@ -325,6 +419,14 @@ report with the model name and the distance.
 Move Sensitivity toward Precise. If it fires with the TV on specifically,
 [#294](https://github.com/wilbowes/EchoMuse/issues/294) is the open work on
 that — say what was playing.
+
+### Can it play a sound when it hears the wake word?
+Yes, from controller 2.25.0 and firmware v2.17.0. In the Echo's **Config →
+Wake word** section it is in the right-hand column, below the Arbitration
+window slider, with Quiet, Medium and Loud levels. It is off by default. If
+the section is dimmed the Echo is following the fleet setting, so switch it to
+Device or change it under the fleet settings. The sound is built in and can't
+be replaced with your own.
 
 ### Can I use my own wake word?
 Yes — [oww_forge](../oww_forge/README.md) trains one, and you install it in
@@ -341,6 +443,20 @@ wrong.
 ### The audio distorts when it's loud.
 Check **Config → Playback**: the limiter and bass guard should be on. If it
 still distorts, report the volume percentage — the number is the diagnostic.
+
+### The 3.5mm jack is very quiet, or only one channel plays.
+Fixed in firmware v2.18.0 (Early Access from v2.18.0-ea.2). A codec switch
+stock turns on with a plug in was never set
+([#566](https://github.com/wilbowes/EchoMuse/issues/566),
+[#669](https://github.com/wilbowes/EchoMuse/issues/669)). On older firmware,
+`tinymix -D 0 "Audio_DacMux_Setting" On` from a shell brings it back until
+the next restart.
+
+### The internal speaker is quieter than stock.
+Reported on some Dots and not others of the same model
+([#630](https://github.com/wilbowes/EchoMuse/issues/630)); there is no
+setting for it yet. Changing `HP Driver Gain` with `tinymix` lasts a few
+seconds, because the firmware keeps writing its own speaker routing back.
 
 ### It sounds worse than stock Alexa did.
 Partly true and partly fixed. A DAC clipping fault above unity gain was found
@@ -367,6 +483,13 @@ conversation agent and a text-to-speech engine that both stream, and a model
 slower than speech may pause between sentences, so if it comes out in fits and
 starts, turn it off again.
 
+### A slow conversation agent never gets to answer.
+The controller waits 30 seconds for Home Assistant's reply to begin and then
+ends the turn, which an agent that calls tools can overrun. From controller
+2.26.0 (Early Access from 2.26.0-ea.2) raise **Reply wait (seconds)** in the
+add-on's options, or `EM_TTS_WAIT_TIMEOUT` on the container, up to 120
+([#805](https://github.com/wilbowes/EchoMuse/issues/805)).
+
 ### Long responses cut off part-way.
 Fixed; update the controller. If a long answer still stops early, a support
 bundle with the time it happened is the right report.
@@ -378,10 +501,16 @@ Barge-in** if it isn't already.
 
 ### Does it do timers?
 Yes — ask for one the way you'd expect, and it rings on the Echo itself.
-Stopping one no longer leaves the Echo deaf. **Stopping a ringing timer by
-voice can still be unreliable**, because the chime competes with what you say.
-Report what you said and what happened; the wording people actually use is the
-useful part.
+
+To stop it, press the action button, or say the wake word and then anything
+at all ("stop", "be quiet", in any language). The wake word pauses the ring
+and lights the listening ring; if you say nothing for four seconds the ring
+resumes. Any Echo that hears you can stop a timer ringing on another. A
+command spoken over a ringing timer stops the timer and is not sent to Home
+Assistant, so say it again once it is quiet.
+
+That is controller 2.26.0 (Early Access from 2.26.0-ea.1). Before it, a
+ringing timer stopped only on an English stop word such as "stop" or "cancel".
 
 ---
 
@@ -408,6 +537,28 @@ comes back as pending.
 ### I re-added a device and its voice port is missing.
 Same fix, same answer: update the controller.
 
+### Can Home Assistant stop a device listening, or tell whether its microphone is muted?
+Yes to both, with two separate controls.
+
+**Wake word** is the dropdown Home Assistant puts on every voice satellite.
+**No wake word** stops the device waking; picking the wake word turns it back
+on (either dropdown, including **Wake word 2**). In an automation, use
+`select.select_option` with `no_wake_word` or the wake word's name. The choice
+survives a controller restart. The microphone stays on, so
+`start_conversation` and `ask_question` still listen. On the default
+[Listening](listening.md) mode the Echo still hears its wake word and the
+controller closes that session at once. Until the close arrives (usually a
+fraction of a second, never more than 3 seconds) the Echo sends what follows
+the wake word.
+
+**Microphone Muted** (`binary_sensor`) is the physical mute button, read-only,
+because only the button can unmute it. Check it before
+`assist_satellite.ask_question`: a muted device captures nothing, and HA waits
+for an answer with no timeout.
+
+The two are independent: the button never changes the wake word setting. The
+media player's **mute** is different again. It silences the speaker only.
+
 ### My device changed its Home Assistant entity IDs.
 That happens whenever a device is deleted and re-added — HA keys entities on
 identity, and a re-added device is a new one. There's no way to carry the old
@@ -424,6 +575,11 @@ They shouldn't — arbitration picks one. **Config → Wake word → Arbitration
 window** widens the window devices are compared in. If both still answer,
 report it.
 
+If the wrong one answers, such as an Echo across the house instead of the one
+beside you: from controller 2.26.0 (Early Access from 2.26.0-ea.2) the Echo
+that heard you loudest answers. Before that it was the one that heard you
+first ([#747](https://github.com/wilbowes/EchoMuse/issues/747)).
+
 ### Can I swap a dead Echo for a new one and keep its history?
 Not yet — [#133](https://github.com/wilbowes/EchoMuse/issues/133).
 
@@ -433,6 +589,13 @@ auto-joining it. **Fixed for devices provisioned by the current wizard**
 ([#317](https://github.com/wilbowes/EchoMuse/issues/317)). A device provisioned
 before that fix can still hit it, and clearing it on a fielded device is
 [#439](https://github.com/wilbowes/EchoMuse/issues/439).
+
+### Can it use 5 GHz WiFi?
+**Yes.** It runs on a combined 2.4 and 5 GHz network. One owner's ISP router
+(a BT Smart Hub 2, which cannot split its bands) let the Echo join on 5 GHz
+and never gave it an address. Turning 5 GHz off until the Echo joined on
+2.4 GHz fixed it. WPA3 is not supported; see the
+[README](../README.md).
 
 ### There's no ambient light sensor on my device.
 Some Dots ship a second-source sensor that binds a different driver. Known,
@@ -476,7 +639,8 @@ our word for it.
 ### Is the link between device and controller encrypted?
 Yes, once the Echo is paired. Approving a new Echo pairs it. An Echo already
 on `plain ws` (its Status tab Link row) pairs when you hold its action button
-for 5 seconds and then approve it in the dashboard; on firmware too old to ask,
+for 7 seconds (5 on firmware before v2.19.0) and then approve it in the
+dashboard; on firmware too old to ask,
 the Status tab offers **Pair** instead. **The ESPHome connection to Home Assistant is
 still plaintext**, including mic audio —
 [#341](https://github.com/wilbowes/EchoMuse/issues/341).
@@ -489,9 +653,11 @@ still plaintext**, including mic audio —
 Only Echo Dot Gen 2 ("biscuit") is supported today. Community ports are in
 progress for the Echo Show 8 ([#358](https://github.com/wilbowes/EchoMuse/pull/358)),
 the Echo Show 5 ([#36](https://github.com/wilbowes/EchoMuse/issues/36)) and
-the Echo 2 ([#554](https://github.com/wilbowes/EchoMuse/pull/554)), and the
-original Echo Dot Gen 3 is being profiled
+the Echo 2 ([#687](https://github.com/wilbowes/EchoMuse/pull/687)), and
+@shortgame11 has EchoMuse running on an Echo Dot Gen 3 in a fork
 ([#527](https://github.com/wilbowes/EchoMuse/issues/527)).
+Only the original Gen 3 has a known unlock: the refreshed Gen 3, the Echo Dot
+Gen 5 and the Echo Studio have none. Check XDA before buying one for this.
 Other boards are welcome — the Android-specific surface is about twenty call
 sites, so a new board is mostly a mic/speaker/LED/button binding.
 

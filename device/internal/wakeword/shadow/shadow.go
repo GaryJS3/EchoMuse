@@ -143,8 +143,9 @@ type Scorer struct {
 	ready     bool
 	lastCross time.Time
 	// prevAbove is whether the previous scored frame cleared the bar in force,
-	// for the two-frame rule at the barge-in bar.
+	// for the two-frame rule at the barge-in bar, and prevAt its capture time.
 	prevAbove bool
+	prevAt    time.Time
 	// The barge window: frames scored at the barge-in bar since the last
 	// TakeBargeWindow, and the highest score among them. The answer to "did
 	// barge-in nearly fire, or was it nowhere close" — the controller's
@@ -489,7 +490,14 @@ func (s *Scorer) run() {
 		}
 		above := score >= threshold
 		crossed := above && (!lowBar || s.prevAbove) && now.Sub(s.lastCross) >= s.refract
-		s.prevAbove = above
+		// A crossing at the barge bar is dated from the first of its two
+		// frames (docs/listening.md). Dated from the second, the session
+		// started a frame late and lost "st" of "stop" (VVV, 2026-10-23).
+		at := q.at
+		if crossed && lowBar {
+			at = s.prevAt
+		}
+		s.prevAbove, s.prevAt = above, q.at
 		if crossed {
 			s.stats.Crossings++
 			s.lastCross = now
@@ -498,7 +506,7 @@ func (s *Scorer) run() {
 		s.mu.Unlock()
 
 		if crossed && s.onCross != nil {
-			s.onCross(score, threshold, q.at)
+			s.onCross(score, threshold, at)
 		}
 	}
 }

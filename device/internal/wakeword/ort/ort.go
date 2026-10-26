@@ -31,6 +31,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"unsafe"
 
@@ -118,10 +119,15 @@ func (r *Runtime) Version() string { return r.version }
 // Models names the three ONNX files the pipeline needs. Melspec and Embedding
 // are openWakeWord's shared feature models; Classifier is the per-wake-word
 // head, so it is the only one that changes when the wake word does.
+//
+// EmbeddingStream is optional: the embedding model rewritten to take only the
+// frames that are new (#893). Empty, missing or unusable, the stock model does
+// the work; see Inferer.StreamStatus.
 type Models struct {
-	Melspec    string
-	Embedding  string
-	Classifier string
+	Melspec         string
+	Embedding       string
+	Classifier      string
+	EmbeddingStream string
 }
 
 type model struct {
@@ -156,6 +162,16 @@ type Inferer struct {
 	mel, emb, cls *model
 
 	xnnpack bool
+
+	// The streaming embedding, nil when it is not in use, and why not.
+	stream    *streamModel
+	streamOff string
+}
+
+type streamModel struct {
+	s     C.em_stream
+	state []float32
+	emb   []float32
 }
 
 // NewInferer opens the three sessions. The caller owns the result and must
@@ -181,7 +197,133 @@ func (r *Runtime) NewInferer(m Models, o Options) (*Inferer, error) {
 		inf.Close()
 		return nil, err
 	}
+	inf.openStream(r, m.EmbeddingStream, o)
 	return inf, nil
+}
+
+// openStream loads the streaming embedding model and proves it against the
+// stock one before it is used. Nothing here can fail NewInferer: a device
+// without the file, or with one that does not reproduce the stock model,
+// scores exactly as it did before, for more CPU, and StreamStatus says why.
+func (i *Inferer) openStream(r *Runtime, path string, o Options) {
+	if path == "" {
+		i.streamOff = "no streaming model given"
+		return
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	sm := &streamModel{emb: make([]float32, wakeword.FeatDim)}
+	if err := goErr(C.em_stream_load(&r.rt, cPath, C.int(o.Threads), cBool(o.XNNPACK),
+		cBool(o.AllowSpinning), &sm.s)); err != nil {
+		i.streamOff = "load: " + err.Error()
+		return
+	}
+	sm.state = make([]float32, int(sm.s.total))
+	i.stream = sm
+	if err := i.verifyStream(); err != nil {
+		C.em_stream_free(&sm.s)
+		i.stream = nil
+		i.streamOff = "self-check: " + err.Error()
+		return
+	}
+	i.ResetStream()
+}
+
+// streamCheckSteps is how many steps the self-check feeds: enough to prime
+// the state and compare three windows after it.
+const streamCheckSteps = 12
+
+// verifyStream feeds one fixed sequence of mel frames to both embedding
+// models and requires the same answer. A streaming model made from a
+// different embedding model, or by a rewrite that is wrong, loads and runs
+// and would otherwise produce scores that are plausible and wrong, which
+// nothing on the device or the controller would report. It costs three stock
+// embeddings and twelve steps, once per scorer.
+func (i *Inferer) verifyStream() error {
+	const step = wakeword.MelStep * wakeword.MelBins
+	mel := make([]float32, streamCheckSteps*step)
+	seed := uint64(0x9E3779B97F4A7C15)
+	for k := range mel {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		// Mel values as the ring holds them: mostly 0..6, some well below.
+		mel[k] = float32((seed>>33)%2000000)/1000000*6 - 6
+	}
+	i.ResetStream()
+	compared := 0
+	for j := 0; j < streamCheckSteps; j++ {
+		got, err := i.EmbedStep(mel[j*step : (j+1)*step])
+		if err != nil {
+			return err
+		}
+		end := (j + 1) * wakeword.MelStep
+		if end < wakeword.MelWindow || j < streamCheckSteps-3 {
+			continue
+		}
+		window := mel[(end-wakeword.MelWindow)*wakeword.MelBins : end*wakeword.MelBins]
+		want, err := i.Embed(window)
+		if err != nil {
+			return err
+		}
+		var worst, scale float64
+		for k := range want {
+			if d := math.Abs(float64(got[k]) - float64(want[k])); d > worst {
+				worst = d
+			}
+			if a := math.Abs(float64(want[k])); a > scale {
+				scale = a
+			}
+		}
+		// The two providers agree to 5e-5 on values up to 66 (VVV,
+		// 2026-10-13); a wrong model differs by the size of the values.
+		if worst > 1e-3*math.Max(scale, 1) {
+			return fmt.Errorf("differs from the stock model by %.3g on values up to %.3g", worst, scale)
+		}
+		compared++
+	}
+	if compared == 0 {
+		return errors.New("compared nothing")
+	}
+	return nil
+}
+
+// Streaming reports whether the streaming embedding is in use.
+func (i *Inferer) Streaming() bool { return i.stream != nil }
+
+// StreamStatus is "on", or why the stock embedding is doing the work.
+func (i *Inferer) StreamStatus() string {
+	if i.stream != nil {
+		return "on"
+	}
+	return i.streamOff
+}
+
+// ResetStream forgets the frames the streaming model has been fed.
+func (i *Inferer) ResetStream() {
+	if i.stream == nil {
+		return
+	}
+	for k := range i.stream.state {
+		i.stream.state[k] = 0
+	}
+}
+
+// EmbedStep advances the streaming model by MelStep frames and returns the
+// embedding of the MelWindow frames ending with them (wakeword.StreamEmbedder
+// has the conditions). The slice is reused by the next call.
+func (i *Inferer) EmbedStep(frames []float32) ([]float32, error) {
+	sm := i.stream
+	if sm == nil {
+		return nil, errors.New("ort: no streaming embedding model")
+	}
+	if want := wakeword.MelStep * wakeword.MelBins; len(frames) != want {
+		return nil, fmt.Errorf("ort: embed step wants %d values, got %d", want, len(frames))
+	}
+	err := goErr(C.em_stream_run(&sm.s, (*C.float)(unsafe.Pointer(&frames[0])),
+		(*C.float)(unsafe.Pointer(&sm.state[0])), (*C.float)(unsafe.Pointer(&sm.emb[0]))))
+	if err != nil {
+		return nil, fmt.Errorf("ort: run streaming embedding: %w", err)
+	}
+	return sm.emb, nil
 }
 
 // XNNPACKActive reports whether the XNNPACK provider was attached. False means
@@ -197,6 +339,11 @@ func (i *Inferer) Close() error {
 		}
 	}
 	i.mel, i.emb, i.cls = nil, nil, nil
+	if i.stream != nil {
+		C.em_stream_free(&i.stream.s)
+		i.stream = nil
+		i.streamOff = "closed"
+	}
 	return nil
 }
 

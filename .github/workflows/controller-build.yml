@@ -28,6 +28,10 @@ on:
     branches: [main]
     paths:
       - 'controller/**'
+      # An EA release-prep commit touches only the channel (its notes live
+      # there since #1023), and a release refuses a commit with no image:
+      # ff06544, 2.27.0-ea.2's, had to be built by hand.
+      - 'controller-ea/**'
       - '.github/workflows/controller-build.yml'
   workflow_dispatch:
 
@@ -38,7 +42,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
@@ -70,6 +74,9 @@ jobs:
           echo "version=v$v" >> "$GITHUB_OUTPUT"
           echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
           echo "building v$v as sha-$(git rev-parse --short=7 HEAD)"
+          # Rebuilds the image's apt layer once a week instead of serving it
+          # from cache until the base digest moves (controller/Dockerfile).
+          echo "apt=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -93,6 +100,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
+            APT_SNAPSHOT=${{ steps.version.outputs.apt }}
           tags: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -112,13 +120,24 @@ jobs:
       # change, but four packages in requirements.txt are unpinned, so what
       # ships can move without a PR. (The base image was the other way until
       # 2026-09-23; it is pinned by digest now.) This is the artifact that gets promoted, so it is checked here
-      # too, by digest. amd64 only — see the script. #496.
+      # too, by digest. #496.
       - name: CPU baseline (kvm64)
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user-static
           controller/tools/cpu_baseline_check.sh \
             ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
+
+      # The arm64 half of the same image under a Cortex-A53 (Pi 3; the Pi 4's
+      # A72 has the same ARMv8.0 set). Emulated on this x86 runner, about a
+      # minute. Main only: the PR job builds amd64 alone, and building arm64
+      # there under QEMU costs far more than this does. A failure here stops
+      # the release, which refuses a commit whose main build did not pass.
+      - name: CPU baseline (Cortex-A53, arm64)
+        run: |
+          controller/tools/cpu_baseline_check.sh \
+            ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }} \
+            arm64
 
       # By digest, for the reason the release workflow documents: there is
       # no string to get wrong and no chance of scanning something other
@@ -137,7 +156,7 @@ jobs:
           output: sbom-${{ steps.version.outputs.sha }}.cdx.json
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-${{ steps.version.outputs.sha }}
           path: sbom-${{ steps.version.outputs.sha }}.cdx.json

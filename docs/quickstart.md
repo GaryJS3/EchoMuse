@@ -28,10 +28,9 @@ Either amonet-biscuit version works: v1.1.0 (FireOS 5, emOS or FireOS with
 root) or v2.0.0 (FireOS 6, emOS).
 
 The Dot ships locked to Amazon's software. Unlocking it involves flashing
-modified firmware over USB — it's the only genuinely fiddly part of the
-project, it takes an hour or so the first time, and it's fully documented
-step-by-step in [rooting](rooting.md), which points at R0rt1z2's XDA Forums
-thread for the exploit itself.
+modified firmware over USB. [firebreak](rooting.md#unlocking-with-firebreak)
+does it from one command in about ten minutes, running R0rt1z2's amonet
+exploit.
 
 The good news: the dashboard has a **provisioning wizard** (plug the Dot into
 your laptop's USB port, open the dashboard in Chrome, follow the steps) that
@@ -57,7 +56,7 @@ always-on machine.
 <details open>
 <summary><b>As a Home Assistant add-on</b></summary>
 
-Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
+Settings → Apps → **Install App** → ⋮ → **Repositories** → **Add**, paste
 `https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
 store. The README has a one-click badge for adding the repository.
 
@@ -178,6 +177,12 @@ The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
 Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
 proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
+Each device also has a **media player**, an **Action Button** event
+(hold-capable firmware), an **Ambient Light** sensor (where fitted) and a
+read-only **Microphone Muted** sensor. HA's **Wake word** dropdown turns
+detection off and on. See
+[the FAQ](faq.md#can-home-assistant-stop-a-device-listening-or-tell-whether-its-microphone-is-muted).
+
 > **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
 > controller, devices should also pop up automatically as discovered
 > "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
@@ -190,10 +195,10 @@ proxy, if enabled, shows up separately as `<name> BT Proxy`.
 
 ## Step 6 — Talk to it
 
-Say the wake word — **"Hey Rhasspy"** by default (changeable in the
+Say the wake word — **"Hey Jarvis"** by default (changeable in the
 dashboard, see [configuration.md](configuration.md)) — then speak normally:
 
-> "Hey Rhasspy … turn off the kitchen lights."
+> "Hey Jarvis … turn off the kitchen lights."
 
 The LED ring tells you what's happening:
 

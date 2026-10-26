@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"math"
 	"sync/atomic"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
 // Volume is applied here, to the PCM, and the DAC's own digital volume
@@ -47,9 +49,22 @@ type softVolume struct {
 
 func (v *softVolume) set(gain float64) { v.target.Store(math.Float64bits(gain)) }
 
+func (v *softVolume) targetGain() float64 {
+	return math.Float64frombits(v.target.Load())
+}
+
+// gainAtFrame predicts the gain apply will use for a frame in the next
+// period. responseGain uses the same curve to cap response*volume at unity.
+func (v *softVolume) gainAtFrame(frame, frames int, target float64) float64 {
+	if frames <= 0 {
+		return target
+	}
+	return v.cur + (target-v.cur)*float64(frame+1)/float64(frames)
+}
+
 // apply scales one stereo S16LE period in place.
 func (v *softVolume) apply(buf []byte) {
-	tgt := math.Float64frombits(v.target.Load())
+	tgt := v.targetGain()
 	frames := len(buf) / 4
 	if frames == 0 || (tgt == 1 && v.cur == 1) {
 		v.cur = tgt
@@ -68,6 +83,70 @@ func (v *softVolume) apply(buf []byte) {
 	v.cur = tgt
 }
 
+// applyFloat applies the period's snapshotted volume target to a
+// wide-precision stereo mix and quantises it to S16 only here, at the final
+// PCM boundary. The caller passes the same target used to cap response gain,
+// so a concurrent control-plane update cannot make their product exceed
+// unity during this period.
+func (v *softVolume) applyFloat(in []float64, out []byte, tgt float64) {
+	frames := min(len(in)/2, len(out)/4)
+	if frames == 0 {
+		v.cur = tgt
+		return
+	}
+	for i := 0; i < frames; i++ {
+		gain := v.gainAtFrame(i, frames, tgt)
+		for c := 0; c < 2; c++ {
+			off := i*4 + c*2
+			x := math.Round(in[i*2+c] * gain)
+			if x > math.MaxInt16 {
+				x = math.MaxInt16
+			} else if x < math.MinInt16 {
+				x = math.MinInt16
+			}
+			binary.LittleEndian.PutUint16(out[off:], uint16(int16(x)))
+		}
+	}
+	v.cur = tgt
+}
+
 // settle takes the target without a ramp, for a period of silence, where
 // there is nothing to click.
-func (v *softVolume) settle() { v.cur = math.Float64frombits(v.target.Load()) }
+func (v *softVolume) settle() { v.cur = v.targetGain() }
+
+// The stock-sound profile's volume law (em_volume.stock_level_db, #229): the
+// plain 0.5dB-per-level law lifted by the board's Voicing.CeilingDb, so full
+// volume drives the output chain's compressors and limiter. Applied BEFORE
+// the chain, so near the top it exceeds unity on purpose. Stock's own 31-step
+// table was dropped: front-loaded, with uneven button steps and a top 30%
+// that bought compression rather than loudness (em_volume has the
+// measurement).
+
+// StockVolumeDb is the gain in dB for a level under the stock-sound law with
+// the given ceiling; ok is false for level 0, which is silence.
+func StockVolumeDb(level int, ceilingDb float64) (db float64, ok bool) {
+	if level <= 0 {
+		return 0, false
+	}
+	return float64(min(level, 127)-127)*0.5 + ceilingDb, true
+}
+
+// StockVolumeGain is StockVolumeDb as a linear gain, 0 for level 0.
+func StockVolumeGain(level int, ceilingDb float64) float64 {
+	db, ok := StockVolumeDb(level, ceilingDb)
+	if !ok {
+		return 0
+	}
+	return math.Pow(10, db/20)
+}
+
+// CueVolumeGain is the volume tone's gain for a level under the law in force
+// (v is the voicing when the stock-sound law is, else nil), so the tone tracks
+// what the music does. The cue is mixed after the chain, so VolumeCue caps it
+// at unity: past the ceiling's unity point the tone stops rising.
+func CueVolumeGain(level int, v *board.Voicing) float64 {
+	if v != nil {
+		return StockVolumeGain(level, v.CeilingDb)
+	}
+	return VolumeGain(level)
+}

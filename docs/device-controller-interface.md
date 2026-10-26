@@ -7,7 +7,7 @@ specification rather than by reading the Dot's source. The controller is
 already board-agnostic; a new board is almost entirely a fresh set of hardware
 **Bindings** behind this same wire protocol.
 
-Terms in **bold** are defined in [CONTEXT.md](../CONTEXT.md). The authoritative
+The authoritative
 source for every message and field is the code cited inline; where this
 document and the code disagree, the code wins and this document is the bug.
 
@@ -80,8 +80,9 @@ message (`device/internal/client/control.go`):
 ```
 
 `base_os`, `board` and the two `kernel_*` fields describe the boot and are
-informational: the controller stores and displays them, and gates Android-only
-payloads on `base_os`. The kernel pair is omitted if `uname` fails. A device
+informational: the controller stores and displays them, gates Android-only
+payloads on `base_os`, and names the Echo's model in Home Assistant from
+`board` (`em_boards`; absent or `unknown` shows the Dot 2's). The kernel pair is omitted if `uname` fails. A device
 for a new board should send all of them.
 
 `boot_id`, `boot_reason` and `emmc` are boot-time health, each omitted when it
@@ -97,8 +98,8 @@ life). Find the eMMC by type (`/sys/bus/mmc/devices/*/type` = `MMC`), not by
 number. `boot_reason` comes from the kernel cmdline and is absent where the
 cmdline is truncated before it, as on biscuit's FireOS 6 kernel.
 
-`capabilities` is the negotiation signal. The Dot announces twelve unconditionally
-plus one conditional (`capabilities()` in `control.go`):
+`capabilities` is the negotiation signal. The Dot announces the capabilities
+below (`capabilities()` in `control.go`):
 
 | Capability | Condition | Meaning |
 |------------|-----------|---------|
@@ -116,9 +117,15 @@ plus one conditional (`capabilities()` in `control.go`):
 | `output_chain` | always | Can run the speaker output chain (EQ → bass guard → limiter) itself, at the ALSA write, from the config keys `eqBands`, `eqLoudness`, `limiter*`, `bassGuard*`. Runs it only when the controller's `ack` carries `output_chain` too, which is the controller saying it has stopped processing: either half alone keeps the old path, so audio is never shaped twice |
 | `wake_cue` | always | Can generate its own wake sound, at `wakeSoundLevel`, independent of volume. Plays it when `wakeSound` is on and a wake has WON: on `listen_ack` for a private-listening session, or on `play_cue` otherwise — never at the crossing, so a ceded wake is silent |
 | `volume_cue` | always | Can generate a `volumeButtonSound` preview at the newly selected level after a physical-button change, or repeat it for another Volume Up press at maximum; only while voice and music are idle |
+| `wake_mic` | always | Reads `wakeMic` (0 = the centre microphone, 1 to 6 = perimeter MK1 to MK6) and listens for the wake word on that microphone. For a unit whose centre microphone has failed (#705). Without it the controller shows the setting disabled. |
+| `remote_volume_arc` | always | Can show the cyan level arc for changed, non-zero remote volume commands when the opt-in `remoteVolumeArc` setting is on. Physical buttons remain unconditional; mute, boot restore, and duplicate state syncs remain silent |
+| `response_level` | always | Can boost the voice plane relative to device volume with `responseLevel` (`low` / `medium` / `high` = 0 / +6 / +12dB). The boost is applied before voice/music mixing and capped so it plus device volume never exceeds unity |
+| `stock_sound` | always | Voices its own speaker while it runs the output chain with no plug in the jack: its own volume law, driver correction and compressor bands, with no key to turn them off. Keeps the bass guard on while it does, whatever `bassGuardEnabled` says; the controller hides that switch for such a device |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 | `sendspin` | always | Can be a Sendspin player (#89) for synchronised multi-room audio from Music Assistant, run when `sendspinEnabled` is on. Music Assistant connects to the device directly (port 8928, advertised as `_sendspin._tcp`); nothing of the session crosses the controller. Whether it is running, connected or paired is the `sendspin` status |
-| `pairing` | always | Asks to pair itself when its owner holds the action button 5 s: a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
+| `wake_word_off` | always | Honours `wakeWordEnabled: false` (Home Assistant's "No wake word"): a wake crossing is reported as a shadow cross and opens no session and no turn. The button still works. Without it the controller declines "No wake word" for an Echo in `listen_state` `local` |
+| `pairing` | always | Asks to pair itself when its owner holds the action button 7 s while it has no controller link or one over plain (5 s, on any link, before v2.19.0; an Echo on wss is already paired, and its hold reaches HA as a long press): a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
+| `ble_connect` | always | Can hold Bluetooth LE connections for the controller and speak GATT over them (#656): up to three links, requests and results as `0x08` frames on `/data`. Acts only while `bleProxyEnabled` and `bleProxyConnections` are both on, and only against a controller announcing `ble_connect` back |
 
 **`aec_hw_ref` is a capability with a runtime companion, and both are needed.**
 The capability says the firmware knows *how* to use a hardware echo reference.
@@ -174,7 +181,7 @@ absent optional fields take prior/default behaviour.
 | `oww_wake` | `score`, `threshold`, `ageMs`, `capturedMono`; `level`, `peak` when the crossing frame is still buffered; under private listening also `session`, `floor`, `barge` | On-device trigger fired (`owwOnDevice=on`). With `session` it opened a private-listening session whose audio follows as `0x07` ([listening.md](listening.md)); without, it lands in `Device.pending_wake` and the continuous stream carries the audio. `level`/`peak` are the wake word's loudness in dBFS with `micGainDb` removed, over the 2.0s ending at the crossing frame (definition: `controller/em_wakelevel.py`); logged, not acted on |
 | `listen_state` | `state` (`local`/`stream`/`degraded`), `reason?` | What the device is doing with its wake stream. Sent on every change and after every `ack` |
 | `listen_end` | `session`, `reason` | The device closed a session itself (`ack_timeout`, `max_open`, `muted`, `link`, `stopped`) |
-| `ambient_light` | `value` | Light reading (only if `ambient_light`) |
+| `ambient_light` | `lux` | Light reading, sent on a real change (only if `ambient_light`); the ~30s `stats` report carries it as `ambientLux` |
 | `stats` | hardware and link telemetry (`internal/client/stats.go`, `DeviceStats`) | Every ~30s, plus once on connect. Every field is optional and absence means **not measured**, never zero. `tcpUpRetrans` is the device's own TCP retransmits across its planes since the last report, `tcpUpSegs` the segments sent where the kernel counts them (FireOS 5's 3.18 does not); `ble` carries the scanner's counters, including `yields`/`yieldedMs` for time the scan stood aside for the link |
 | `ble_adverts` | `adverts[]` | Batch from the passive BLE scanner. **Legacy path** — send these on `/data` as `0x06` whenever the controller announced `ble_adverts_data`, and use this message only when it did not (#404) |
 | `wifi_scan_result` | `networks[]` of `{ssid, ssid_hex, signal}`, or `error` | Answer to `wifi_scan` |
@@ -182,13 +189,15 @@ absent optional fields take prior/default behaviour.
 | `pair_request` | — | The owner held the action button on a connected device (only if `pairing`). The controller shows **Approve pairing**; approval issues a rotated token and the CA over the shell plane, then bounces the link |
 | `sendspin_status` | `status` (`sendspin.Status`), or null when the player stopped | The Sendspin player's state as it changes: `state` (`listening`, `connected`, `playing`, `busy` while Home Assistant holds the music plane, `error`), `server`, `paired`, `pairedWith`, `group`, `synced`, `syncErrUs`, `bufferedMs`, player counters. No secrets. The `stats` report carries the same object as `sendspin` |
 | `sendspin_token` | `token`, `clientId`, or `error` | Answer to `sendspin_token_request`. The token (`SP:0…`) carries the device's Sendspin pairing key: the controller hands it to the one waiting request and never logs or stores it |
+| `playback_stats` | `periods`, `underruns`, `stats`, `barge?` | One completed speaker stream (a response or announcement), sent once it has drained. `stats` is the delivery margin (`minDepth`, `primeWaitMs`, `recvSpanMs`, `maxGapMs`, `bytesRecv`, from `speaker.StreamStats`); `periods`/`underruns` are also sent flat for controllers that predate `stats`. `barge` is the on-device scorer's `{peak, bar, frames}` over the stream when it scored one |
+| `log` | `level`, `message` | A device log line for the dashboard and support bundles. The controller persists and pushes it |
 | `pong` | `id`, `mono` when answering a `ping` that carried an `id` | Keepalive reply. `id` echoes the ping's; `mono` is the device's monotonic clock in ms (any fixed origin), which the controller maps onto its own to date `capturedMono`. Unsolicited keepalive pongs carry neither |
 
 **Controller → Device**
 
 | `type` | Payload | Meaning |
 |--------|---------|---------|
-| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain` |
+| `ack` | `device_id`, `features[]` | Registration accepted. `features` is the CONTROLLER's capability list — the mirror of the device's own, and read the same way: a feature that is absent is one the controller cannot do. Absent entirely on controllers before 2.23.0. Current: `ble_adverts_data`, `listen_session`, `output_chain`, `ble_connect` |
 | `refused` | — | Not admitted: link auth refused this device's credentials (a wrong token, or a token it has stopped presenting). Sent before the close; firmware with `pairing` shows the refused ring, which tells the owner to hold the action button to pair. A device also treats a TLS certificate its CA did not sign as refused. Older firmware ignores it |
 | `pending` | `pairing?` | Not admitted: the device is unapproved, or with `pairing:true` its pairing request is recorded and waiting for an admin. Keep redialling within the window; an approval admits the next dial |
 | `leds` | `leds[]`, `listening?` | One LED frame; `listening:true` marks the listening ring so the direction overlay keys off it |
@@ -230,6 +239,7 @@ board implementer must not read a single global table.
 | `0x03` | speaker EOS | End of voice stream |
 | `0x04` | music | Music PCM chunk on its own plane — **only if `audio_mix`** |
 | `0x05` | music EOS | End of music stream — **only if `audio_mix`** |
+| `0x08` | ble gatt | One JSON request of the Bluetooth connection bridge — **only if the device announced `ble_connect`** |
 
 **Device → Controller (capture)**
 
@@ -240,6 +250,7 @@ board implementer must not read a single global table.
 | `0x05` | no-speech-timeout | Bounded turn: no speech ever detected before the timeout |
 | `0x06` | ble adverts | Batch of scanned BLE advertisements — **only if the controller announced `ble_adverts_data`** |
 | `0x07` | session audio | `[0x07][session u32 BE][seq u16 BE][PCM]` — private-listening audio, **only if the controller announced `listen_session`** |
+| `0x08` | ble gatt | One JSON result or event of the Bluetooth connection bridge — **only if the controller announced `ble_connect`** |
 
 `0x04`/`0x05` are safe to reuse because playback frames only ever flow to the
 device and capture frames only ever flow from it. The two capture sentinels are
@@ -291,6 +302,69 @@ Two sender-side rules, neither of which the controller can enforce for you:
   when the link is already in trouble, which is what this frame exists to
   avoid.
 
+### `0x08` — Bluetooth connections (GATT)
+
+The one frame code used in both directions. The payload is one UTF-8 JSON
+object. The device is a GATT **client**: it connects out to peripherals for
+Home Assistant, and holds at most three links (`limit` below says how many).
+
+**Negotiated both ways.** The device sends nothing unless the controller's
+`ack` carried `ble_connect`; the controller sends nothing unless the device
+announced it. Connections also need `bleProxyEnabled` and
+`bleProxyConnections` on — the links live inside the scan session.
+
+Controller → device. Every request carries a `req` number the result echoes.
+Addresses are `aa:bb:cc:dd:ee:ff`; `addr_type` is 0 public, 1 random.
+
+| `t` | Fields | Result adds |
+|-----|--------|-------------|
+| `connect` | `addr`, `addr_type` | `mtu` |
+| `disconnect` | `addr` | — (already gone is `ok`) |
+| `services` | `addr` | `services[]`: `uuid`, `start`, `end`, `chars[]`: `uuid`, `handle` (declaration), `value_handle`, `props`, `descs[]`: `uuid`, `handle` |
+| `read` | `addr`, `handle` | `value` (base64; a long value is followed to its end) |
+| `write` | `addr`, `handle`, `value` (base64), `response` | — |
+| `slots` | — | answered by a `slots` event carrying the `req` |
+
+Device → controller.
+
+| `t` | Fields | Meaning |
+|-----|--------|---------|
+| `result` | `req`, `ok`, and on failure `error`, `att?`, `detail?` | The answer to one request |
+| `notify` | `addr`, `handle`, `value` (base64), `ind` | A notification, or an indication (`ind:true`, already confirmed to the peer) |
+| `disconnected` | `addr`, `reason` | A link ended, whoever ended it. `reason` is the HCI code (`0x08` supervision timeout, `0x13` the peer, `0x16` us) |
+| `slots` | `free`, `limit`, `addrs[]` | Sent whenever it changes. `free` is 0 while connections are switched off |
+
+`error` is one of: `disabled` (the setting is off), `no_slots`, `timeout` (the
+peer did not answer a connect within 20s), `already_connected`,
+`not_connected`, `disconnected` (the link dropped mid-request), `att` (the
+peer refused; `att` carries its ATT error code, e.g. 5 for insufficient
+authentication), `att_timeout` (no answer in 30s, after which the link is
+dropped, as the ATT specification requires), `too_long` (a write over
+MTU−3 bytes), `not_running` (the scan session is down), `busy`, `bad_request`,
+`failed` (`detail` says what, for a log).
+
+Rules a device must keep:
+
+- **Requests for one peer run in the order they arrived.** Home Assistant
+  writes a command and then reads its result. Different peers must not wait
+  for each other: a connect can take 20s.
+- **UUIDs are the full 128-bit form**, lowercase with hyphens, whatever
+  length the peer used.
+- **Uuids, handles and values are the peer's own and are passed on as given.**
+  The device does not subscribe on the controller's behalf: enabling a
+  notification is a `write` of the CCCD descriptor like any other, and every
+  notification that arrives is forwarded.
+- **There is no pairing.** A peer's Security Request is answered with Pairing
+  Not Supported, and attributes that need it fail with `att` 5.
+- **Drop every link when the control connection goes.** A result has nowhere
+  to go, and a peripheral's connection slot is better freed than held.
+- **Do not hold these frames back for a turn**, unlike `0x06`. A result is
+  owed to a request.
+- A link is made at a 30ms connection interval and moved to 500ms after 5s
+  without a request, because the interval decides how much of the scan
+  survives beside it (24% of adverts at 30ms, about 56% at 500ms, measured on
+  biscuit). A board with separate radios need not do this.
+
 ## Config push — `ConfigMessage`
 
 The controller sends `config` on connect and on any per-device config change.
@@ -309,17 +383,22 @@ startupVolume,
 beamAngle, beamformingEnabled,
 aecEnabled, aecDelayMs, aecTailMs, agcEnabled, nsAsr,
 bargeInEnabled, bargeInThreshold,
-bleProxyEnabled,
+bleProxyEnabled, bleProxyConnections,
 sendspinEnabled, sendspinUnpaired, sendspinName,
 eqBands, eqLoudness, limiterEnabled, limiterThreshold, limiterRelease,
 bassGuardEnabled, bassGuardDb,
 ledScene, ledListenColor, ledThinkColor,
 meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
-wakeArbitrationMs, duckDb,
+wakeArbitrationMs, duckDb, responseLevel,
 buttonSingleTapEvent, buttonMultiTapMs,
 owwOnDevice, saveUtterances, streamReply,
 wakeSound, wakeSoundLevel, volumeButtonSound
 ```
+
+`wakeWordEnabled` is sent on its own, not with the stored config: it is
+Home Assistant's per-Echo picker state, pushed on connect and on change to
+firmware announcing `wake_word_off`. A pointer, because false is the value
+that matters.
 
 Not every field is acted on by the device. The output-chain keys (`limiter*`,
 `bassGuard*`), `eq*`, `saveUtterances`, `streamReply`, `wakeArbitrationMs`, and the
@@ -385,8 +464,8 @@ to do its own job (see the direction note in the repo-root `CLAUDE.md`).
 
 The `crown` bindings are built behind a Go build tag mirroring `server`
 (ADR-0001). The hardware inventory — ALSA cards/devices, formats, input-device
-paths, autostart — lives in
-[echo-show-8-hardware-map.md](echo-show-8-hardware-map.md); this section records
+paths, autostart — lives in `docs/echo-show-8-hardware-map.md` on the branch of
+[PR #358](https://github.com/wilbowes/EchoMuse/pull/358), which has not merged; this section records
 only what the *interface* commits to for MVP.
 
 **Capabilities for MVP** (subset of the Dot's):
@@ -417,8 +496,8 @@ real hardware 2026-08-26 with `device/tools/capture_mics`: opens clean, real
 signal on all 4 mic channels, no digital zeros. `device/tools/hw_refine_probe`
 confirms the driver's own range matches checkers' constants exactly. Full
 history (why "digital zeros" was the original wrong read, the gain-fix
-investigation, the actual capture data) is in
-[echo-show-8-hardware-map.md](echo-show-8-hardware-map.md#on-hardware-capture-2026-08-26--the-gono-go-measurement-done).
+investigation, the actual capture data) is in the same file on
+[PR #358](https://github.com/wilbowes/EchoMuse/pull/358)'s branch.
 
 **Still open: quiet-room/across-room SNR**, not raw capture — today's test was
 a loud-room sanity check with music playing, not a wake-reliability

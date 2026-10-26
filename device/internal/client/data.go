@@ -18,6 +18,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
+	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
 )
@@ -66,6 +67,13 @@ const (
 	// drop audio for a session it has already closed. Only sent against a
 	// controller announcing listen_session; see docs/listening.md.
 	frameTypeListen = byte(0x07)
+	// frameTypeBleGatt carries one JSON message of the Bluetooth connection
+	// bridge (#656, internal/bluetooth/bridge.go), in EITHER direction:
+	// requests down, results and events up. On this plane for the reason the
+	// adverts are — the control plane is where liveness is measured, and a
+	// notifying peripheral can be chatty. Only used when the device announces
+	// `ble_connect` and the controller announces it back.
+	frameTypeBleGatt = byte(0x08)
 )
 
 // Listen states, reported to the controller as listen_state. See
@@ -176,6 +184,8 @@ type DataClient struct {
 	mic      mic.Subscribable
 	spk      speaker.Speaker
 
+	bleGattCallback func([]byte)
+
 	readyCh chan string
 
 	micMu     sync.Mutex
@@ -262,6 +272,10 @@ type DataClient struct {
 	// that wires ch8 differently, and cancelling the near-end against
 	// another mic is far worse than not cancelling at all. A board that
 	// fails either test simply keeps the software tap.
+	// makeupClipped counts samples clamped giving aecHeadroom back after
+	// the canceller; reported with the extraction's own clipping.
+	makeupClipped uint64
+
 	hwRefSeenSilent bool
 	hwRefSeenAudio  bool
 	hwRefOn         bool
@@ -304,7 +318,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		mic:        microphone,
 		spk:        spk,
 		readyCh:    make(chan string, 1),
-		beam:       beamformer.New(),
+		beam:       beamformer.New(board.CurrentLayout().Mics),
 		proc:       processor.New(),
 		aec:        canceller,
 		listenGate: listen.New(0, 0, 0),
@@ -352,6 +366,27 @@ func (d *DataClient) SetAecRefSource(v string) {
 		return
 	}
 	log.Printf("[aec] far-end reference source: %s", v)
+}
+
+// aecHeadroom is the gain (6dB) the mics are extracted without while the
+// canceller is armed, and applyMakeup gives back after it.
+const aecHeadroom = 2.0
+
+// applyMakeup scales S16LE mono in place by g, clamping, and returns how
+// many samples it clamped.
+func applyMakeup(b []byte, g float64) (clipped uint64) {
+	for i := 0; i+1 < len(b); i += 2 {
+		v := math.Round(float64(int16(binary.LittleEndian.Uint16(b[i:]))) * g)
+		if v > 32767 {
+			v = 32767
+			clipped++
+		} else if v < -32768 {
+			v = -32768
+			clipped++
+		}
+		binary.LittleEndian.PutUint16(b[i:], uint16(int16(v)))
+	}
+	return clipped
 }
 
 // noteEchoRef feeds one period of the candidate reference channel to the
@@ -629,6 +664,32 @@ func (d *DataClient) SendBleAdverts(payload []byte) bool {
 	return true
 }
 
+// OnBleGatt registers the receiver for ble-gatt frames from the controller.
+// It is called on the data plane's read loop and must not block.
+func (d *DataClient) OnBleGatt(cb func([]byte)) { d.bleGattCallback = cb }
+
+// SendBleGatt writes one bridge message to the controller. Unlike an advert
+// batch it never yields to a turn: a result is owed to a request, and a
+// dropped one leaves Home Assistant waiting out its own timeout. It is a few
+// hundred bytes.
+func (d *DataClient) SendBleGatt(payload []byte) bool {
+	d.connMu.Lock()
+	defer d.connMu.Unlock()
+	if d.conn == nil {
+		return false
+	}
+	frame := make([]byte, 1+len(payload))
+	frame[0] = frameTypeBleGatt
+	copy(frame[1:], payload)
+	d.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+	if err := d.conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
+		log.Printf("[data] ble gatt: send error: %v", err)
+		d.conn.Close()
+		return false
+	}
+	return true
+}
+
 func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
@@ -898,6 +959,10 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 			log.Println("[data] Music: end of stream")
 			if d.spk != nil {
 				d.spk.EndMusicStream()
+			}
+		case frameTypeBleGatt:
+			if cb := d.bleGattCallback; cb != nil && len(data) > 1 {
+				cb(append([]byte(nil), data[1:]...))
 			}
 		default:
 			log.Printf("[data] Unknown binary frame type: 0x%02x", data[0])
@@ -1169,8 +1234,23 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.beam.Unlock()
 			}
 
-			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
-			clipped := d.beam.ClippedSamples()
+			if snap.WakeMic != nil {
+				d.beam.SetWakeMic(*snap.WakeMic)
+			}
+			// With the canceller armed the mics are extracted with
+			// aecHeadroom in hand and it is given back after cancellation:
+			// at 24dB the echo of loud playback clipped the S16 extraction
+			// (943 samples in a minute on VVV, 2026-10-18), clipping is
+			// distortion no canceller removes, and barge-in fell from 4/5 to
+			// 3/5. After cancellation the echo is 15-25dB down, so the
+			// make-up cannot clip it; the overall gain is micGainDb either
+			// way, so nothing downstream sees a change.
+			aecArmed := d.aec.Enabled()
+			extractGain := gainLin
+			if aecArmed {
+				extractGain = gainLin / aecHeadroom
+			}
+			mono, angle := d.beam.Process(raw, beamAngle, extractGain)
 
 			// AEC — subtract the speaker's own output before anything
 			// measures or gates the signal. No-op while aecEnabled=false.
@@ -1192,10 +1272,18 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				echoRef = d.beam.EchoRef(raw)
 			}
 			if echoRef != nil && d.noteEchoRef(echoRef) {
-				mono = d.aec.ProcessWithRef(mono, echoRef)
+				// Every microphone is cancelled, not only the one in use:
+				// the echo path differs per microphone and a turn locks to
+				// a different one each time (#814).
+				sel := d.beam.OutputChannel(beamAngle)
+				mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef)
 			} else {
 				mono = d.aec.Process(mono)
 			}
+			if aecArmed {
+				d.makeupClipped += applyMakeup(mono, aecHeadroom)
+			}
+			clipped := d.beam.ClippedSamples() + d.makeupClipped
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD on raw beamformed output — pre-NS/AGC so threshold is

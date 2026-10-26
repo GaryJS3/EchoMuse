@@ -1,4 +1,5 @@
 # Shell payloads are executed directly on Linux/Android, including after OTA.
 *.sh text eol=lf
 *.py text eol=lf
+*.mjs text eol=lf
 emos/device/em-wifi text eol=lf

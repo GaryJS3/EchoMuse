@@ -160,6 +160,63 @@
       --track:        rgba(0,0,0,0.35);
     }
 
+    /* ── Scale tokens: type, font and corner radius ───────────────────
+       The same in both themes, so defined once. Each value is one the
+       dashboard already used, so converting a call site to its token
+       changes nothing on screen (#820). Values used too rarely to name
+       stay literal for now; tests/test_design_scale.py counts them and the
+       count can only fall. */
+    :root {
+      --font-sans: 'DM Sans', sans-serif;
+      --font-mono: 'DM Mono', monospace;
+
+      --fs-2xs:  8px;
+      --fs-xs:   9px;
+      --fs-sm:  10px;
+      --fs-md:  11px;
+      --fs-base: 12px;
+      --fs-lg:  14px;
+      --fs-xl:  16px;
+      --fs-2xl: 24px;
+      --fs-3xl: 28px;
+
+      --radius-xs:  2px;
+      --radius-sm:  4px;
+      --radius-md:  6px;
+      --radius-lg:  8px;
+      --radius-xl: 10px;
+      --radius-card:   14px;
+      --radius-dialog: 16px;
+
+      /* Letter-spacing by job: titles, mixed-case mono text, small
+         uppercase labels, section headings. */
+      --tracking-tight:   -0.02em;
+      --tracking-text:     0.05em;
+      --tracking-label:    0.1em;
+      --tracking-heading:  0.15em;
+
+      /* Spacing: --space-N is N x 2px, for gaps, padding and margins. A
+         2px step because 6, 10 and 14 are among the most used values;
+         odd values (3, 5, 7px...) stay literal until the scale is
+         collapsed. */
+      --space-1:   2px;
+      --space-2:   4px;
+      --space-3:   6px;
+      --space-4:   8px;
+      --space-5:  10px;
+      --space-6:  12px;
+      --space-7:  14px;
+      --space-8:  16px;
+      --space-9:  18px;
+      --space-10: 20px;
+      --space-12: 24px;
+      --space-14: 28px;
+      --space-16: 32px;
+      --space-18: 36px;
+      --space-24: 48px;
+      --space-30: 60px;
+    }
+
     html, body { height: 100%; background: var(--bg); color: var(--text); }
     /* No transition on the toggle itself — a 200ms cross-fade of an
        entire dense dashboard reads as a glitch, not a flourish. */
@@ -180,7 +237,7 @@
       width: 30px; height: 30px; padding: 0;
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 50%; cursor: pointer;
-      font-family: 'DM Mono', monospace; font-size: 13px; line-height: 1;
+      font-family: var(--font-mono); font-size: 13px; line-height: 1;
       color: var(--text2);
       box-shadow: 0 1px 0 var(--sheen) inset;
       transition: background 0.12s, border-color 0.12s, color 0.12s;
@@ -216,13 +273,13 @@
     .em-pill {
       background: linear-gradient(180deg, var(--surface), var(--border-soft));
       color: var(--text); border: 1px solid var(--faint); border-radius: 20px;
-      font-family: 'DM Sans', sans-serif; font-size: 12px; font-weight: 500;
-      padding: 7px 20px; cursor: pointer; white-space: nowrap;
+      font-family: var(--font-sans); font-size: var(--fs-base); font-weight: 500;
+      padding: var(--space-4) var(--space-10); cursor: pointer; white-space: nowrap;
       transition: all 0.1s;
       box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2);
     }
-    .em-pill--small { font-size: 11px; padding: 5px 14px; }
-    .em-pill--big   { font-size: 14px; font-weight: 600; padding: 11px 28px; }
+    .em-pill--small { font-size: var(--fs-md); padding: var(--space-3) var(--space-7); }
+    .em-pill--big   { font-size: var(--fs-lg); font-weight: 600; padding: var(--space-6) var(--space-14); }
     .em-pill--accent {
       background: linear-gradient(180deg, var(--accent-hi), var(--accent));
       color: var(--accent-tint); border-color: var(--accent-deep);
@@ -241,27 +298,30 @@
     /* Bordered card grouping related controls. */
     .em-panel {
       background: linear-gradient(170deg, var(--raised), var(--card));
-      border: 1px solid var(--border); border-radius: 10px;
-      padding: 14px 16px 16px;
+      border: 1px solid var(--border); border-radius: var(--radius-xl);
+      padding: var(--space-7) var(--space-8) var(--space-8);
       box-shadow: 0 1px 0 var(--sheen) inset;
     }
+    /* A panel in a vertical stack of them (Settings): roomier, with the gap
+       below it. */
+    .em-panel--stacked { padding: var(--space-8) var(--space-9); margin-bottom: var(--space-9); }
 
     /* Small uppercase mono heading. */
     .em-label {
-      font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
-      text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 12px;
+      font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
+      text-transform: uppercase; letter-spacing: var(--tracking-heading); margin-bottom: var(--space-6);
     }
 
     /* Lit readout panel. */
     .em-lcd {
       background: linear-gradient(160deg, var(--lcd-face), var(--lcd-bg));
-      border: 1px solid var(--lcd-line); border-radius: 5px;
-      padding: 5px 10px; min-width: 54px;
+      border: 1px solid var(--lcd-line); border-radius: var(--radius-md);
+      padding: var(--space-3) var(--space-5); min-width: 54px;
       box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
     }
     .em-lcd__label {
-      font-family: 'DM Mono', monospace; font-size: 8px; color: var(--lcd-dim);
-      text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 3px;
+      font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--lcd-dim);
+      text-transform: uppercase; letter-spacing: var(--tracking-heading); margin-bottom: 3px;
     }
 
     /* Dark inset surface. Five sites re-typed the same four declarations —
@@ -288,14 +348,14 @@
     /* Scrolling log/transcript output. */
     .em-console {
       background: linear-gradient(160deg, var(--lcd-face), var(--lcd-bg));
-      border: 1px solid var(--lcd-line); border-radius: 8px;
+      border: 1px solid var(--lcd-line); border-radius: var(--radius-lg);
       box-shadow: var(--shadow-inset);
-      font-family: 'DM Mono', monospace; font-size: 10px; line-height: 1.7;
-      padding: 10px 14px; overflow-y: auto;
+      font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.7;
+      padding: var(--space-5) var(--space-7); overflow-y: auto;
     }
     .em-console__line--head {
-      color: var(--accent-lit); letter-spacing: 0.12em; font-weight: 600;
-      margin-top: 10px; padding-top: 6px;
+      color: var(--accent-lit); letter-spacing: var(--tracking-label); font-weight: 600;
+      margin-top: var(--space-5); padding-top: var(--space-3);
       border-top: 1px solid var(--lcd-faint);
     }
     .em-console__line--head:first-child { margin-top: 0; padding-top: 0; border-top: none; }
@@ -303,25 +363,25 @@
     .em-console__line--ok    { color: var(--ok); }
     .em-console__line--warn  { color: var(--warn); }
     .em-console__line--wait  { color: var(--accent-lit); font-style: italic; }
-    .em-console__line--adb   { color: var(--lcd-dim); font-size: 9px; }
+    .em-console__line--adb   { color: var(--lcd-dim); font-size: var(--fs-xs); }
     .em-console__line--detail { color: var(--lcd-green); opacity: 0.85; }
     .em-console__line--info  { color: var(--lcd-green); }
 
     /* Provisioning wizard chrome. */
-    .em-wizard-progress { padding: 10px 14px 8px; border-bottom: 1px solid var(--border); }
+    .em-wizard-progress { padding: var(--space-5) var(--space-7) var(--space-4); border-bottom: 1px solid var(--border); }
     .em-wizard-progress__track {
-      height: 4px; background: var(--sunken); border-radius: 2px; overflow: hidden;
+      height: 4px; background: var(--sunken); border-radius: var(--radius-xs); overflow: hidden;
     }
     .em-wizard-progress__fill {
-      height: 100%; background: var(--accent); border-radius: 2px;
+      height: 100%; background: var(--accent); border-radius: var(--radius-xs);
       transition: width 0.25s ease;
     }
     .em-wizard-progress__label {
-      font-family: 'DM Mono', monospace; font-size: 8px; color: var(--muted);
-      letter-spacing: 0.08em; text-transform: uppercase; margin-top: 6px;
+      font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--muted);
+      letter-spacing: var(--tracking-label); text-transform: uppercase; margin-top: var(--space-3);
     }
     .em-wizard-step {
-      padding: 5px 12px; display: flex; align-items: flex-start; gap: 6px;
+      padding: 5px 12px; display: flex; align-items: flex-start; gap: var(--space-3);
       border-left: 2px solid transparent;
     }
     .em-wizard-step--active {
@@ -330,24 +390,24 @@
     .em-wizard-step--done   { opacity: 0.75; }
     .em-wizard-step--error  { border-left-color: var(--warn); }
     .em-wizard-step__num {
-      font-family: 'DM Mono', monospace; font-size: 8px; color: var(--muted);
+      font-family: var(--font-mono); font-size: var(--fs-2xs); color: var(--muted);
       flex-shrink: 0; width: 14px; padding-top: 1px;
     }
     .em-wizard-step__icon {
-      font-family: 'DM Mono', monospace; font-size: 10px; flex-shrink: 0; width: 10px;
+      font-family: var(--font-mono); font-size: var(--fs-sm); flex-shrink: 0; width: 10px;
     }
     .em-wizard-step__label {
-      font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 0.04em;
+      font-family: var(--font-mono); font-size: var(--fs-xs); letter-spacing: var(--tracking-text);
       line-height: 1.4;
     }
     .em-wizard-step--active .em-wizard-step__label { color: var(--text); font-weight: 600; }
     .em-wizard-step--pending .em-wizard-step__label { color: var(--muted); }
     .em-wizard-status {
-      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
-      padding: 8px 12px; border-radius: 8px;
+      display: flex; align-items: center; gap: var(--space-4); margin-bottom: var(--space-5);
+      padding: var(--space-4) var(--space-6); border-radius: var(--radius-lg);
       background: color-mix(in srgb, var(--accent) 12%, var(--hairline));
       border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
-      font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text2);
     }
     .em-wizard-status__dot {
       width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
@@ -363,31 +423,41 @@
       .em-wizard-status__dot { animation: none; opacity: 0.7; }
     }
     .em-wizard-upcoming {
-      margin-bottom: 12px; padding: 10px 12px;
+      margin-bottom: var(--space-6); padding: var(--space-5) var(--space-6);
       background: var(--hairline); border: 1px solid var(--border-soft);
-      border-radius: 8px;
+      border-radius: var(--radius-lg);
     }
-    .em-wizard-upcoming__item { margin-top: 6px; }
+    .em-wizard-upcoming__item { margin-top: var(--space-3); }
     .em-wizard-upcoming__item:first-of-type { margin-top: 0; }
     .em-wizard-upcoming__name {
-      font-family: 'DM Mono', monospace; font-size: 9px; color: var(--text2);
-      letter-spacing: 0.06em; display: block;
+      font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text2);
+      letter-spacing: var(--tracking-text); display: block;
     }
     .em-wizard-upcoming__desc {
-      font-family: 'DM Mono', monospace; font-size: 9px; color: var(--muted);
-      line-height: 1.5; display: block; margin-top: 2px;
+      font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted);
+      line-height: 1.5; display: block; margin-top: var(--space-1);
     }
-    .em-wizard-recovery { margin-bottom: 12px; }
+    .em-wizard-recovery { margin-bottom: var(--space-6); }
     .em-wizard-recovery__hint {
-      font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
-      line-height: 1.6; margin: 0 0 10px;
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text2);
+      line-height: 1.6; margin: 0 0 var(--space-5);
     }
-    .em-wizard-recovery__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .em-wizard-recovery__reason {
+      font-family: var(--font-mono); font-size: var(--fs-md); color: var(--warn);
+      line-height: 1.6; margin: 0 0 var(--space-4);
+    }
+    .em-wizard-recovery__actions { display: flex; gap: var(--space-4); flex-wrap: wrap; }
+    /* A light system scrollbar on these dark panes read as a white strip. */
+    .em-wizard-scroll, .em-console { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
 
     /* Keyboard focus. Inline styles cannot express :focus-visible at all, so
        until now there was no focus ring anywhere in the dashboard. */
     .em-iconbtn:focus-visible,
-    .em-pill:focus-visible {
+    .em-pill:focus-visible,
+    .em-tab:focus-visible,
+    .em-input:focus-visible,
+    [role="button"]:focus-visible,
+    [role="switch"]:focus-visible {
       outline: 2px solid var(--accent-hi); outline-offset: 2px;
     }
 
@@ -411,8 +481,49 @@
       /* Two-column content grids stack on phones. */
       .em-grid2 { grid-template-columns: 1fr !important; }
     }
-    /* Tab strips scroll horizontally instead of overflowing on any width. */
-    .em-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    /* Text inputs: the inset field. Used WITH .em-inset, which gives the
+       dark panel and turns the text tokens to their dark values, so the
+       field reads the same in both themes. An input with neither gets the
+       browser's white box, which is what eight of them were. */
+    .em-input {
+      font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text);
+      border: 1px solid var(--field-line); min-width: 0;
+      /* The field is dark in both themes, so the browser's own parts (a
+         select's option list, autofill, the arrow) are drawn dark too. */
+      color-scheme: dark;
+    }
+    .em-input::placeholder { color: var(--muted); }
+
+    /* Form fields (Slider, NumberField, PasswordField, Toggle, Select,
+       ControllerEndpointsField): the wrapper, the label, a short aside
+       beside it and a help line under it. Layout particular to one field
+       stays inline in that component. */
+    .em-field { margin-bottom: var(--space-10); min-width: 0; }
+    .em-field__label { font-family: var(--font-mono); font-size: var(--fs-md); color: var(--text2); }
+    .em-field__label--disabled { color: var(--muted); }
+    .em-field__aside { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted); margin-left: var(--space-4); }
+    .em-field__help {
+      font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--muted);
+      line-height: 1.6; margin-bottom: var(--space-4);
+    }
+
+    /* TabBar: the raised folder tabs of the device view and Settings. The
+       strip scrolls horizontally instead of overflowing on any width. */
+    .em-tabs {
+      display: flex; gap: var(--space-1);
+      overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    }
+    .em-tab {
+      background: transparent; color: var(--muted);
+      border: 1px solid transparent; border-radius: var(--radius-md) var(--radius-md) 0 0;
+      font-family: var(--font-mono); font-size: var(--fs-sm);
+      text-transform: uppercase; letter-spacing: var(--tracking-label);
+      padding: var(--space-4) var(--space-7); margin-bottom: -1px; cursor: pointer; transition: color 0.15s;
+    }
+    .em-tab--active {
+      background: linear-gradient(180deg, var(--raised), var(--surface)); color: var(--text);
+      border-color: var(--border-hard); border-bottom-color: var(--surface);
+    }
     .em-tabs::-webkit-scrollbar { display: none; }
     .em-tabs > button { flex-shrink: 0; }
   </style>

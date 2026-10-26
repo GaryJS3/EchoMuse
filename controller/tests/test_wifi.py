@@ -6,6 +6,7 @@ it, which are both valid; and it could not name an SSID that is not UTF-8.
 """
 import pytest
 
+import _sources
 import em_wifi
 
 
@@ -56,10 +57,7 @@ def test_invalid_passphrases(psk):
 
 def test_the_endpoint_uses_em_wifi_and_forwards_the_bytes():
     """Source shape: em_api cannot be imported by this suite."""
-    from pathlib import Path
-    src = (Path(__file__).parent.parent / "em_api.py").read_text()
-    start = src.index("async def _post_device_wifi(")
-    body = src[start:src.index("\nasync def ", start + 1)]
+    body = _sources.def_source("_post_device_wifi")
     assert "em_wifi.problem(em_wifi.ssid_bytes(ssid, ssid_hex), psk)" in body
     assert 'change["ssid_hex"] = ssid_hex' in body
     assert '(\'"\', "\\\\")' not in body, "the old quote/backslash refusal is back"

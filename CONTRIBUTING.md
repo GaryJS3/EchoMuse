@@ -64,17 +64,19 @@ Saved searches for the common questions. Counts move; the filters do not.
 
 By area: [device](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adevice) · [controller](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Acontroller) · [dashboard](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adashboard) · [provisioning](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aprovisioning) · [ha](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aha) · [forge](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Aforge) · [docs](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20label%3Aarea%3Adocs)
 
-By release: [2.21.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.21.0) · [2.22.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A2.22.0) · [3.0.0](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A3.0.0)
+By milestone: [Link resilience](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A%22Link%20resilience%22) · [Sendspin and device-side audio](https://github.com/wilbowes/EchoMuse/issues?q=is%3Aopen%20is%3Aissue%20milestone%3A%22Sendspin%20and%20device-side%20audio%22)
 
 ## Milestones and releases
 
-Issues are grouped by the release they are meant to land in, and a milestone
-is a theme rather than a bucket:
+The firmware (`v*` tags), the controller (`controller-v*`) and emOS
+(`emos-v*`) are released separately. A release goes to Early Access first and
+becomes general once it has soaked and passed [UAT](docs/uat.md).
 
-- **2.21.0** — controller GA, in early access now. Closed to new work.
-- **2.22.0** — link resilience. The audio path survives a bad link (#140).
-- **3.0.0** — Sendspin multi-room, and the output chain moves to the device
-  (#272).
+A milestone is a theme, and is not tied to a release number:
+
+- **Link resilience** — the audio path survives a bad link (#140).
+- **Sendspin and device-side audio** — Sendspin and the output chain on the
+  device (#272) have shipped; the milestone holds what is left around them.
 
 An issue with no milestone is not scheduled, which is not the same as
 unwanted. A `ready` issue outside a milestone is still a fine thing to pick
@@ -100,19 +102,57 @@ or `docker compose up --build`. emOS builds with `emos/build.sh`; see
 ## Before you open a PR
 
 ```bash
-cd controller && python -m pytest tests/    # needs pytest numpy scipy pyyaml
+cd controller && python -m pytest tests/    # needs pytest pytest-cov numpy scipy pyyaml aiohttp websockets bcrypt zeroconf protobuf
 cd device && go test ./... && go vet ./...
 ```
 
-Both run in CI on every push. **Please add a test if your change is pure
-logic** — the controller suite deliberately cannot import `em_controller` or
-`em_esphome` (they pull in aiohttp, zeroconf and openwakeword), so decisions
-that need coverage get extracted into their own module: see `em_button`,
-`em_linkauth`, `em_turnclock`, `em_barge`. Following that pattern is the
-single easiest way to get a change reviewed quickly.
+Both run in CI on every push and both report coverage; the controller
+baseline is in `controller/.coveragerc`.
+
+**Please add a test for anything you can reach.** This said "if your change
+is pure logic" until 2026-10-03, when the suite could not import
+`em_controller` (#739). It now can, and reachability is not testability:
+reading the source and asserting on substrings proves something about the
+*text*, which is not what runs. Extracting a decision into its own module
+(`em_linkauth`, `em_button`, `em_turnclock`) is still the easiest to review.
 
 Hardware-dependent code is not testable on the host and nobody expects you to
 fake it. Say what you tested it on.
+
+## AI-assisted contributions
+
+AI-assisted pull requests are welcome. Most of EchoMuse was written with
+Claude, and the commit trailers say so.
+
+What we ask for is a person behind the change:
+
+- **Start from a need.** A fault you hit, a device you own, an issue you
+  read. A change that exists only because an agent scanned the repository and
+  decided something should be different will be closed.
+- **Know the thread.** Read the issue and the decisions already made on it
+  before building. If someone has claimed the work, ask first.
+- **Know what you are sending and why.** You do not need to account for every
+  line, but you should understand what the change does, the problem it
+  addresses and how it fits the design.
+- **Two open pull requests at a time.** Each one is read in full and some
+  are run on an Echo, so a batch waits longer than two would. Past two,
+  the extra ones are closed without review; open them again when one of
+  yours has merged or closed.
+- **Keep it short and well scoped.** One change per pull request. The
+  description and your replies in review can be written with an assistant,
+  as ours are. What we ask is that they are concise and easy to follow: a
+  wall of text will be sent back.
+- **Say what was tested.** If it touches a device, tell us which Echo it ran
+  on, or say plainly that it did not.
+- **No unattended agents.** Pull requests, issues and comments posted without
+  a person reading them first will be closed.
+
+We judge a contribution by the thought behind it. Who or what typed it does
+not count against it. If we are unsure, we will ask, and a good answer
+settles it.
+
+If you are an assistant working for a contributor: post as that person, never
+sign as the project, and leave the `CLAUDE.md` files out of the pull request.
 
 ## What we maintain, so you do not have to
 

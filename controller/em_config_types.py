@@ -27,6 +27,7 @@ say which it is.
 
 from __future__ import annotations
 
+import logging
 import math
 
 INT = "an integer"
@@ -50,7 +51,9 @@ KINDS: dict[str, str] = {
     "bargeInEnabled": BOOL,
     "bargeInThreshold": FLOAT,
     "duckDb": FLOAT,
+    "responseLevel": STR,
     "beamAngle": FLOAT,
+    "wakeMic": INT,
     "beamformingEnabled": BOOL,
     "agcEnabled": BOOL,
     "aecEnabled": BOOL,
@@ -58,11 +61,13 @@ KINDS: dict[str, str] = {
     "aecTailMs": INT,
     "aecRefSource": STR,
     "bleProxyEnabled": BOOL,
+    "bleProxyConnections": BOOL,
     "sendspinEnabled": BOOL,
     "sendspinUnpaired": BOOL,
     "wakeSound": BOOL,
     "wakeSoundLevel": STR,
     "volumeButtonSound": BOOL,
+    "remoteVolumeArc": BOOL,
     "eqBands": FLOAT_LIST,
     "eqLoudness": BOOL,
     "bassGuardEnabled": BOOL,
@@ -132,3 +137,21 @@ def drop_invalid(config: dict) -> tuple[dict, list[str]]:
     if not bad:
         return config, []
     return {k: v for k, v in config.items() if k not in bad}, bad
+
+
+log = logging.getLogger("echomuse.api")
+
+
+def well_typed(device_id: str, config: dict) -> dict:
+    """
+    `config` without stored values of the wrong type, for a push to a device.
+
+    One mistyped field fails the device's whole decode, and the conversions in
+    em_device_config.apply_live_config raise on it; a dropped key reads as absent at
+    both ends. Every full-config push goes through here.
+    """
+    config, bad = drop_invalid(config)
+    if bad:
+        log.warning(f"[api] {device_id}: stored config has values of the wrong "
+                    f"type, not sent: {', '.join(bad)}")
+    return config

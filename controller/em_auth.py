@@ -37,6 +37,7 @@ import bcrypt
 from aiohttp import web
 
 import em_db as db
+import em_http
 import em_ingressauth
 
 log = logging.getLogger("echomuse.auth")
@@ -126,7 +127,8 @@ async def login(username: str, password: str) -> tuple[str, str]:
         raise AuthError("invalid_credentials", "Invalid username or password", 401)
 
     token = generate_token()
-    expiry_days = int(db.get_config("session_expiry_days", "30") or 30)
+    expiry_days = int(await loop.run_in_executor(
+        None, db.get_config, "session_expiry_days", "30") or 30)
 
     await loop.run_in_executor(
         None, db.create_session, token, user["id"], expiry_days
@@ -172,7 +174,8 @@ async def login_via_ingress(identity) -> tuple[str, str]:
         existing = await loop.run_in_executor(None, db.ha_admin_count)
         role = em_ingressauth.role_for(
             existing_ha_admins=existing,
-            configured_default=db.get_config("ingress_default_role", "readonly"),
+            configured_default=await loop.run_in_executor(
+                None, db.get_config, "ingress_default_role", "readonly"),
         )
         user_id = await loop.run_in_executor(
             None, db.create_ha_user, identity.user_id, identity.username, role)
@@ -183,7 +186,8 @@ async def login_via_ingress(identity) -> tuple[str, str]:
         )
 
     token = generate_token()
-    expiry_days = int(db.get_config("session_expiry_days", "30") or 30)
+    expiry_days = int(await loop.run_in_executor(
+        None, db.get_config, "session_expiry_days", "30") or 30)
     await loop.run_in_executor(
         None, db.create_session, token, user["id"], expiry_days
     )
@@ -273,7 +277,7 @@ def require_auth(handler):
     async def wrapper(request: web.Request) -> web.Response:
         user = await resolve_session(request)
         if user is None:
-            return _error("not_authenticated", "Authentication required", 401)
+            return em_http.error("not_authenticated", "Authentication required", 401)
         request["user"] = user
         return await handler(request)
     return wrapper
@@ -289,9 +293,9 @@ def require_admin(handler):
     async def wrapper(request: web.Request) -> web.Response:
         user = await resolve_session(request)
         if user is None:
-            return _error("not_authenticated", "Authentication required", 401)
+            return em_http.error("not_authenticated", "Authentication required", 401)
         if user["role"] != "admin":
-            return _error("forbidden", "Admin access required", 403)
+            return em_http.error("forbidden", "Admin access required", 403)
         request["user"] = user
         return await handler(request)
     return wrapper
@@ -425,7 +429,7 @@ async def _create_first_admin_locked(
     if not secrets.compare_digest(bootstrap_token, _bootstrap_token):
         raise AuthError("invalid_token", "Invalid setup token", 401)
 
-    if db.user_count() > 0:
+    if await asyncio.get_running_loop().run_in_executor(None, db.user_count) > 0:
         raise AuthError("setup_complete", "A user already exists", 403)
 
     _validate_credentials(username, password)
@@ -476,20 +480,10 @@ class AuthError(Exception):
         self.status = status
 
     def to_response(self) -> web.Response:
-        return _error(self.code, self.message, self.status)
+        return em_http.error(self.code, self.message, self.status)
 
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
-
-def _error(code: str, message: str, status: int) -> web.Response:
-    """Consistent error response shape per spec."""
-    import json
-    return web.Response(
-        status=status,
-        content_type="application/json",
-        body=json.dumps({"error": message, "code": code}),
-    )
-
 
 # A pre-hashed dummy password used to make failed login timing
 # indistinguishable from a successful bcrypt check on a wrong password.

@@ -16,6 +16,8 @@ What has to land on a device, in `shadow.DefaultDir`:
     embedding_model.onnx   1.3MB   wake word
     <stem>.onnx           ~0.9MB   one classifier per wake model
     silero_vad.onnx        1.9MB   the turn stream's speech gate (VAD_NAME)
+    embedding_stream.onnx  1.3MB   the embedding model, 8 new frames per call
+                                   (STREAM_NAME, #893)
 
 The runtime is vendored into the controller image at build time (pinned by
 version + sha256, the same treatment the Dockerfile already gives xterm and
@@ -62,6 +64,16 @@ RUNTIME_DIR = "/app/models/oww_runtime"
 # copy crashes ORT on the Echo, so it must never be sourced from the package.
 # Optional — a device without it gates on RMS exactly as before.
 VAD_NAME = "silero_vad.onnx"
+
+# The embedding model rewritten to take only the mel frames that are new
+# (tools/oww_stream.py, #893): the same embeddings for about a third of the
+# CPU on an Echo. Built into RUNTIME_DIR by the Dockerfile's `oww_stream`
+# stage from the same embedding_model.onnx the package ships, both pinned by
+# sha256. Must match shadow.EmbeddingStreamFile on the device — there is a
+# test. Optional at both ends: firmware that predates it ignores the file,
+# and a device without it, or whose copy fails the firmware's self-check
+# against the stock model, scores with the stock model as before.
+STREAM_NAME = "embedding_stream.onnx"
 
 # The stock wake words a user can actually select, and therefore the set every
 # device carries. Must match dashboard.jsx's WW_MODELS — there is a test.
@@ -126,18 +138,10 @@ def runtime_source(runtime_dir: str | Path = RUNTIME_DIR) -> Path | None:
 
 def openwakeword_resources() -> Path | None:
     """
-    The installed openwakeword package's bundled models directory.
-
-    Imported lazily and tolerantly: this module is unit-tested in an
-    environment that deliberately does not have openwakeword (see CLAUDE.md
-    on keeping the test deps to pytest/numpy/scipy).
+    The installed openwakeword package's bundled models directory, or None.
+    Located, never imported (em_oww_models.resources_dir says why).
     """
-    try:
-        import openwakeword  # noqa: F401
-    except Exception:
-        return None
-    d = Path(openwakeword.__file__).parent / "resources" / "models"
-    return d if d.is_dir() else None
+    return em_oww_models.resources_dir()
 
 
 def classifier_source(oww_model: str,
@@ -248,6 +252,15 @@ def desired_assets(models: list[str],
                 f"{VAD_NAME} is not in this controller image — devices keep "
                 f"the RMS speech gate"
             )
+        stream = Path(runtime_dir) / STREAM_NAME
+        if stream.is_file():
+            assets.append(Asset(STREAM_NAME, stream, md5_file(stream),
+                                stream.stat().st_size, "stream"))
+        else:
+            problems.append(
+                f"{STREAM_NAME} is not in this controller image — devices keep "
+                f"the stock embedding model"
+            )
 
     for name in SHARED_NAMES:
         p = (resources / name) if resources else None
@@ -323,7 +336,7 @@ def plan_sync(desired: list[Asset],
     # Extra classifiers already on the device, newest first. Anything that is
     # not a .onnx, or is one of the shared/desired files, is left alone —
     # this deletes only files it positively recognises as evictable.
-    required = set(want) | set(SHARED_NAMES) | {RUNTIME_NAME, VAD_NAME}
+    required = set(want) | set(SHARED_NAMES) | {RUNTIME_NAME, VAD_NAME, STREAM_NAME}
     extras = sorted(
         (n for n in actual if n.endswith(".onnx") and n not in required),
         key=lambda n: actual[n][1],

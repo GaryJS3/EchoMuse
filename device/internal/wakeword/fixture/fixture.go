@@ -12,6 +12,7 @@ package fixture
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -272,12 +273,36 @@ func Compare(got, want []float32) Diff {
 // spy wraps an Inferer to capture the tensors flowing between the models while
 // the real pipeline drives them. Copies are taken because implementations are
 // free to reuse their output buffers, and ort.Inferer does.
+//
+// It passes the streaming embedding through when the engine has one, so the
+// pipeline under test is the one the device runs. Embeddings are read from the
+// Detector, not here: a streaming engine is also stepped to build its state,
+// and those outputs are not embeddings.
 type spy struct {
 	inner    wakeword.Inferer
+	stream   wakeword.StreamEmbedder
 	melInLen []int
 	melOuts  [][]float32
-	embs     [][]float32
 }
+
+func (s *spy) Streaming() bool { return s.stream != nil && s.stream.Streaming() }
+func (s *spy) ResetStream() {
+	if s.stream != nil {
+		s.stream.ResetStream()
+	}
+}
+func (s *spy) EmbedStep(frames []float32) ([]float32, error) {
+	if s.stream == nil {
+		return nil, errors.New("fixture: engine has no streaming embedding")
+	}
+	return s.stream.EmbedStep(frames)
+}
+
+// StockOnly hides an engine's streaming embedding, so Verify can be asked
+// about the stock model on an engine that has both.
+func StockOnly(inf wakeword.Inferer) wakeword.Inferer { return stockOnly{inf} }
+
+type stockOnly struct{ wakeword.Inferer }
 
 func (s *spy) Melspec(samples []float32) ([]float32, int, error) {
 	out, frames, err := s.inner.Melspec(samples)
@@ -288,13 +313,7 @@ func (s *spy) Melspec(samples []float32) ([]float32, int, error) {
 	return out, frames, err
 }
 
-func (s *spy) Embed(window []float32) ([]float32, error) {
-	out, err := s.inner.Embed(window)
-	if err == nil {
-		s.embs = append(s.embs, append([]float32(nil), out...))
-	}
-	return out, err
-}
+func (s *spy) Embed(window []float32) ([]float32, error) { return s.inner.Embed(window) }
 
 func (s *spy) Classify(feats []float32) (float32, error) { return s.inner.Classify(feats) }
 
@@ -316,6 +335,9 @@ type Report struct {
 	// the wrong number of embeddings. These matter more than a tolerance miss:
 	// they mean the pipeline and the models disagree about shape.
 	Structural []string
+
+	// Streaming is whether the embeddings came from the streaming model.
+	Streaming bool
 
 	// Err is set if the run could not be completed at all.
 	Err error
@@ -408,15 +430,20 @@ func (r Report) Summary() string {
 // is the probe whose answer gets trusted — it runs on the hardware.
 func Verify(inf wakeword.Inferer, fx *ORT) Report {
 	s := &spy{inner: inf}
+	s.stream, _ = inf.(wakeword.StreamEmbedder)
 	d := wakeword.New(s)
-	r := Report{ScoreFrom: wakeword.FeatWindow}
+	r := Report{ScoreFrom: wakeword.FeatWindow, Streaming: s.Streaming()}
 
 	scores := make([]float32, len(fx.Records))
+	embs := make([][]float32, len(fx.Records))
 	for i := range fx.Records {
 		n, err := d.Push(fx.Chunk(i))
 		if err != nil {
 			r.Err = fmt.Errorf("chunk %d: push: %w", i, err)
 			return r
+		}
+		if n > 0 {
+			embs[i] = d.LastEmbedding()
 		}
 		if n != 1 {
 			r.Structural = append(r.Structural,
@@ -443,7 +470,7 @@ func Verify(inf wakeword.Inferer, fx *ORT) Report {
 				i, s.melInLen[i], rec.MelInLen))
 		}
 		r.Melspec = append(r.Melspec, Compare(s.melOuts[i], rec.MelOut))
-		r.Embedding = append(r.Embedding, Compare(s.embs[i], rec.Emb))
+		r.Embedding = append(r.Embedding, Compare(embs[i], rec.Emb))
 
 		var d Diff
 		if i >= r.ScoreFrom {

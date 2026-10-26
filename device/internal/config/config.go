@@ -43,12 +43,21 @@ type Device struct {
 	// barge-in look like an on-device miss.
 	BargeInEnabled   bool
 	BargeInThreshold float64
+	// WakeWordEnabled is Home Assistant's wake word picker (#286): false is
+	// "No wake word". A crossing then never opens a session or starts a
+	// turn, so a privately listening Echo sends nothing; the button still
+	// works. Not stored: the controller pushes it on every connect.
+	WakeWordEnabled bool
 	// DuckDb is how far MUSIC is attenuated while a voice turn plays over
 	// it, in dB (negative = quieter). Config rather than a constant because
 	// it is a taste parameter that needs iterating in a real room, the same
 	// reasoning as the LED meter response curve — not something to discover
 	// via a firmware OTA per attempt.
 	DuckDb float64
+	// ResponseLevel is the relative gain for the voice stream: low (0dB),
+	// medium (+6dB), or high (+12dB). The speaker caps it against the device
+	// volume so their combined gain never exceeds unity.
+	ResponseLevel string
 
 	// WakeSound plays a short rising two-tone when the wake word is
 	// recognised (#120). Off by default: it interrupts "<wakeword>, do this".
@@ -57,6 +66,12 @@ type Device struct {
 	WakeSound bool
 	// WakeSoundLevel is "quiet", "medium" or "loud" (internal/cue).
 	WakeSoundLevel string
+
+	// RemoteVolumeArc shows the cyan volume arc when a live remote command
+	// changes the volume. Physical buttons always show it; the boot-time
+	// volume restore never does. Off by default because an unprompted ring was
+	// found distracting, but useful as an opt-in accessibility setting (#634).
+	RemoteVolumeArc bool
 
 	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
 	// "on".
@@ -92,6 +107,12 @@ type Device struct {
 	// (0–360, clockwise from 12 o'clock). -1 = auto (track loudest source).
 	BeamAngle          float64
 	BeamformingEnabled bool
+
+	// WakeMic picks the mic the unlocked path (wake word listening, and
+	// turns with beamforming off) reads. 0 = the centre mic, the default and
+	// right for nearly every unit; 1-6 = perimeter mic MK1-MK6. An escape
+	// hatch for a dead centre mic (#705), not a tuning knob.
+	WakeMic int
 
 	// AGC toggle — pointer typed so false is expressible over the wire.
 	// Defaults true; applies to bounded lockMic turn streams only (forced
@@ -136,6 +157,10 @@ type Device struct {
 	// BLE proxy (passive scan over /dev/stpbt, internal/bluetooth) —
 	// pointer typed so false is expressible over the wire. Default off.
 	BleProxyEnabled *bool
+	// Whether Home Assistant may open connections through the proxy (#656).
+	// Separate from the scan, and default off: a connection can operate the
+	// device at the other end.
+	BleProxyConnections *bool
 
 	// Sendspin player (internal/sendspin, #89). Both default off: the player
 	// opens a listening port and an mDNS record, so it runs only where
@@ -192,14 +217,18 @@ func (d *Device) loadDefaults() {
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
+	d.WakeWordEnabled = true
 	d.DuckDb = envFloat("DUCK_DB", -18)
+	d.ResponseLevel = normaliseResponseLevel(envStr("RESPONSE_LEVEL", ResponseLevelLow))
 	d.WakeSound = envBool("WAKE_SOUND", false)
 	d.WakeSoundLevel = envStr("WAKE_SOUND_LEVEL", "medium")
+	d.RemoteVolumeArc = envBool("REMOTE_VOLUME_ARC", false)
 	d.AdcDigitalGain = envInt("ADC_DIGITAL_GAIN", 88)
 	d.AdcMicpga = envInt("ADC_MICPGA", 40)
 	d.MicGainDb = clampMicGainDb(envInt("MIC_GAIN_DB", 24))
 	d.BeamAngle = envFloat("BEAM_ANGLE", -1)
 	d.BeamformingEnabled = envBool("BEAMFORMING_ENABLED", true)
+	d.WakeMic = clampWakeMic(envInt("WAKE_MIC", 0))
 	agcEnabled := envBool("AGC_ENABLED", true)
 	d.AgcEnabled = &agcEnabled
 	// true to match em_db.DEFAULT_DEVICE_CONFIG, which now defaults AEC on
@@ -252,6 +281,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
 	}
+	if msg.WakeWordEnabled != nil {
+		d.WakeWordEnabled = *msg.WakeWordEnabled
+	}
 	if msg.BargeInThreshold > 0 {
 		d.BargeInThreshold = msg.BargeInThreshold
 	}
@@ -261,6 +293,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.DuckDb != nil {
 		d.DuckDb = *msg.DuckDb
 	}
+	if msg.ResponseLevel != "" {
+		d.ResponseLevel = normaliseResponseLevel(msg.ResponseLevel)
+	}
 	if msg.WakeSound != nil {
 		d.WakeSound = *msg.WakeSound
 	}
@@ -269,6 +304,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.VolumeButtonSound != nil {
 		d.VolumeButtonSound = *msg.VolumeButtonSound
+	}
+	if msg.RemoteVolumeArc != nil {
+		d.RemoteVolumeArc = *msg.RemoteVolumeArc
 	}
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
@@ -288,6 +326,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BeamformingEnabled != nil {
 		d.BeamformingEnabled = *msg.BeamformingEnabled
 	}
+	if msg.WakeMic != nil {
+		d.WakeMic = clampWakeMic(*msg.WakeMic)
+	}
 	if msg.AgcEnabled != nil {
 		d.AgcEnabled = msg.AgcEnabled
 	}
@@ -306,6 +347,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.BleProxyEnabled != nil {
 		d.BleProxyEnabled = msg.BleProxyEnabled
 	}
+	if msg.BleProxyConnections != nil {
+		d.BleProxyConnections = msg.BleProxyConnections
+	}
 	if msg.SendspinEnabled != nil {
 		d.SendspinEnabled = msg.SendspinEnabled
 	}
@@ -319,6 +363,13 @@ func (d *Device) Apply(msg ConfigMessage) {
 		d.ListeningAnim = msg.ListeningAnim
 	}
 	applyOutput(&d.Output, msg)
+}
+
+// WakeWordOn reports whether a wake word crossing may start a turn (#286).
+func (d *Device) WakeWordOn() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.WakeWordEnabled
 }
 
 // WakeSoundSetting reports whether the wake sound is on, and at what level.
@@ -335,6 +386,46 @@ func (d *Device) VolumeButtonSoundEnabled() bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.VolumeButtonSound
+}
+
+// RemoteVolumeArcEnabled reports whether live remote volume changes should
+// show the same cyan level arc as the physical buttons.
+func (d *Device) RemoteVolumeArcEnabled() bool {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.RemoteVolumeArc
+}
+
+const (
+	ResponseLevelLow    = "low"
+	ResponseLevelMedium = "medium"
+	ResponseLevelHigh   = "high"
+)
+
+func normaliseResponseLevel(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case ResponseLevelMedium:
+		return ResponseLevelMedium
+	case ResponseLevelHigh:
+		return ResponseLevelHigh
+	default:
+		return ResponseLevelLow
+	}
+}
+
+// ResponseGainDB returns the configured relative voice-stream gain. Unknown
+// values fail safely to today's 0dB behaviour.
+func (d *Device) ResponseGainDB() float64 {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	switch d.ResponseLevel {
+	case ResponseLevelMedium:
+		return 6
+	case ResponseLevelHigh:
+		return 12
+	default:
+		return 0
+	}
 }
 
 // applyOutput merges the output-chain keys. Every one of them has a
@@ -379,6 +470,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	beamAngle := d.BeamAngle
+	wakeMic := d.WakeMic
 	// C4 fix (2026-07-05 review): previously &d.BeamformingEnabled leaked a
 	// pointer into the live mutex-guarded struct — the caller (streamMic,
 	// every period) dereferences it after RUnlock, racing with Apply()
@@ -388,6 +480,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	// Same reason as beamformingEnabled above: copy, never point into the
 	// mutex-guarded struct.
 	bargeInEnabled := d.BargeInEnabled
+	wakeWordEnabled := d.WakeWordEnabled
 	agcEnabled := true
 	if d.AgcEnabled != nil {
 		agcEnabled = *d.AgcEnabled
@@ -404,35 +497,42 @@ func (d *Device) Snapshot() ConfigMessage {
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
+	bleProxyConnections := d.BleProxyConnections != nil && *d.BleProxyConnections
 	volumeButtonSound := d.VolumeButtonSound
 	sendspinEnabled := d.SendspinEnabled != nil && *d.SendspinEnabled
 	sendspinUnpaired := d.SendspinUnpaired != nil && *d.SendspinUnpaired
+	remoteVolumeArc := d.RemoteVolumeArc
 	return ConfigMessage{
-		VadThreshold:       d.VadThreshold,
-		VadSpeechMs:        d.VadSpeechMs,
-		VadSilenceMs:       d.VadSilenceMs,
-		OwwThreshold:       d.OwwThreshold,
-		OwwModel:           d.OwwModel,
-		OwwOnDevice:        d.OwwOnDevice,
-		BargeInEnabled:     &bargeInEnabled,
-		BargeInThreshold:   d.BargeInThreshold,
-		StartupVolume:      d.StartupVolume,
-		VolumeButtonSound:  &volumeButtonSound,
-		AdcDigitalGain:     &adcDigitalGain,
-		AdcMicpga:          &adcMicpga,
-		MicGainDb:          &micGainDb,
-		BeamAngle:          &beamAngle,
-		BeamformingEnabled: &beamformingEnabled,
-		AgcEnabled:         &agcEnabled,
-		AecEnabled:         &aecEnabled,
-		AecDelayMs:         &aecDelayMs,
-		AecTailMs:          d.AecTailMs,
-		AecRefSource:       d.AecRefSource,
-		BleProxyEnabled:    &bleProxyEnabled,
-		SendspinEnabled:    &sendspinEnabled,
-		SendspinUnpaired:   &sendspinUnpaired,
-		SendspinName:       d.SendspinName,
-		ListeningAnim:      d.ListeningAnim,
+		VadThreshold:        d.VadThreshold,
+		VadSpeechMs:         d.VadSpeechMs,
+		VadSilenceMs:        d.VadSilenceMs,
+		OwwThreshold:        d.OwwThreshold,
+		OwwModel:            d.OwwModel,
+		OwwOnDevice:         d.OwwOnDevice,
+		BargeInEnabled:      &bargeInEnabled,
+		BargeInThreshold:    d.BargeInThreshold,
+		ResponseLevel:       d.ResponseLevel,
+		WakeWordEnabled:     &wakeWordEnabled,
+		StartupVolume:       d.StartupVolume,
+		VolumeButtonSound:   &volumeButtonSound,
+		AdcDigitalGain:      &adcDigitalGain,
+		AdcMicpga:           &adcMicpga,
+		MicGainDb:           &micGainDb,
+		BeamAngle:           &beamAngle,
+		WakeMic:             &wakeMic,
+		BeamformingEnabled:  &beamformingEnabled,
+		AgcEnabled:          &agcEnabled,
+		AecEnabled:          &aecEnabled,
+		AecDelayMs:          &aecDelayMs,
+		AecTailMs:           d.AecTailMs,
+		AecRefSource:        d.AecRefSource,
+		BleProxyEnabled:     &bleProxyEnabled,
+		BleProxyConnections: &bleProxyConnections,
+		SendspinEnabled:     &sendspinEnabled,
+		SendspinUnpaired:    &sendspinUnpaired,
+		SendspinName:        d.SendspinName,
+		RemoteVolumeArc:     &remoteVolumeArc,
+		ListeningAnim:       d.ListeningAnim,
 	}
 }
 
@@ -479,27 +579,34 @@ type ConfigMessage struct {
 	//
 	// Written to disk for init like the password above, and ignored on
 	// FireOS, which uses adbd.
-	ConsoleTimeoutMin  *int     `json:"consoleTimeoutMin,omitempty"`
-	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
-	DuckDb             *float64 `json:"duckDb,omitempty"`
-	BeamAngle          *float64 `json:"beamAngle,omitempty"`
-	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
-	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
-	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
-	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
-	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
-	AecTailMs          int      `json:"aecTailMs,omitempty"`
-	AecRefSource       string   `json:"aecRefSource,omitempty"`
-	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
-	SendspinEnabled    *bool    `json:"sendspinEnabled,omitempty"`
-	SendspinUnpaired   *bool    `json:"sendspinUnpaired,omitempty"`
-	SendspinName       string   `json:"sendspinName,omitempty"`
+	ConsoleTimeoutMin *int  `json:"consoleTimeoutMin,omitempty"`
+	BargeInEnabled    *bool `json:"bargeInEnabled,omitempty"`
+	// A pointer because false ("No wake word") is the value that matters.
+	WakeWordEnabled     *bool    `json:"wakeWordEnabled,omitempty"`
+	BargeInThreshold    float64  `json:"bargeInThreshold,omitempty"`
+	DuckDb              *float64 `json:"duckDb,omitempty"`
+	ResponseLevel       string   `json:"responseLevel,omitempty"`
+	BeamAngle           *float64 `json:"beamAngle,omitempty"`
+	BeamformingEnabled  *bool    `json:"beamformingEnabled,omitempty"`
+	HasBeamforming      bool     `json:"hasBeamforming,omitempty"`
+	WakeMic             *int     `json:"wakeMic,omitempty"`
+	AgcEnabled          *bool    `json:"agcEnabled,omitempty"`
+	AecEnabled          *bool    `json:"aecEnabled,omitempty"`
+	AecDelayMs          *int     `json:"aecDelayMs,omitempty"`
+	AecTailMs           int      `json:"aecTailMs,omitempty"`
+	AecRefSource        string   `json:"aecRefSource,omitempty"`
+	BleProxyEnabled     *bool    `json:"bleProxyEnabled,omitempty"`
+	BleProxyConnections *bool    `json:"bleProxyConnections,omitempty"`
+	SendspinEnabled     *bool    `json:"sendspinEnabled,omitempty"`
+	SendspinUnpaired    *bool    `json:"sendspinUnpaired,omitempty"`
+	SendspinName        string   `json:"sendspinName,omitempty"`
 	// WakeSound: a pointer so "off" is distinguishable from absent.
 	WakeSound      *bool  `json:"wakeSound,omitempty"`
 	WakeSoundLevel string `json:"wakeSoundLevel,omitempty"`
 	// VolumeButtonSound: a pointer so "off" is distinguishable from absent.
 	VolumeButtonSound *bool `json:"volumeButtonSound,omitempty"`
+	// RemoteVolumeArc: a pointer so "off" is distinguishable from absent.
+	RemoteVolumeArc *bool `json:"remoteVolumeArc,omitempty"`
 
 	// Output chain (internal/outchain). Pointers because zero is a real
 	// setting for every one of them; see applyOutput.
@@ -617,4 +724,14 @@ func envStr(key string, def string) string {
 		return v
 	}
 	return def
+}
+
+// clampWakeMic keeps an out-of-range value on the centre mic (0) rather than
+// guessing a perimeter mic: the centre is the default for a reason, and a
+// typo should land there.
+func clampWakeMic(v int) int {
+	if v < 0 || v > 6 {
+		return 0
+	}
+	return v
 }

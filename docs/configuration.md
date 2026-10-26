@@ -83,18 +83,28 @@ the fleet defaults will not affect it. The save succeeds either way, so the
 symptom is a control that appears to do nothing at all.
 
 ### Equalizer (8 faders + presets)
-Shapes the tone of the voice responses, like the EQ on a stereo. The Dot's
-little speaker is boomy and dull by default.
+Shapes the tone of everything the speaker plays. On firmware with the new
+sound, the Echo already corrects its own speaker, so **Flat** is the
+recommended setting and the presets lean it one way:
 
-- **Flat** — no shaping.
-- **Clarity** — boosts the upper-mid frequencies where speech intelligibility
-  lives. Good default for voice.
-- **Warmth** — gentle low-mid lift, softer top. Nicer for music-ish content.
+- **Flat**: the Echo's own voicing, no extra shaping.
+- **Warm**: more body, softer top.
+- **Clear**: leaner low end, more presence.
 - Drag any fader for a custom curve.
 
-### Speech boost
-An extra presence bump for spoken responses. Try it if responses sound
-muffled from across the room.
+Upgrading resets the old **Speech** and **Music** presets to Flat, because
+on the new sound they would boost the bass twice. A custom curve is kept.
+
+### Response level
+Sets spoken responses relative to the device's normal volume: **Low** keeps
+the existing level, **Medium** adds 6dB, and **High** adds 12dB. The volume
+buttons still move both media and responses together; this setting only makes
+voice louder within that range. Near maximum volume the extra boost tapers
+away, reaching none at maximum, so it cannot drive the output above full
+scale. The wake sound remains independent and uses Wake sound level.
+
+Older firmware cannot apply this gain. Its control is disabled for those
+devices and explains that newer firmware is required.
 
 ### Speak while the reply is written
 Off by default. When it is off, the Dot starts speaking once Home Assistant
@@ -115,8 +125,9 @@ silence and carries on when the next part arrives, so the reply is not lost, but
 it pauses. Try it with a few long replies. If they come out in fits and starts,
 turn it off.
 
-With it on, the 30 seconds the controller waits for a reply to begin only has to
-be met by the first words.
+With it on, the wait for a reply to begin — 30 seconds by default, and the
+add-on's **Reply wait** option if a tool-using agent needs longer (#805) — only
+has to be met by the first words.
 
 ### Speaker protection
 Keeps bass the driver cannot deliver from muddying everything above it. Leave
@@ -231,10 +242,10 @@ whether or not the controller is reachable.
 
 ## 02 — Wake word
 
-How the device decides you said the magic word. By default this work happens
-on the controller, not the Dot — the Dot just streams audio to it. The Dot
-can also do this work itself, either alongside the controller as a
-comparison or instead of it; see **Wake word detection** below.
+How the device decides you said the magic word. By default the Dot does this
+work itself and sends nothing until it hears the word. The controller can do
+it instead, with the Dot streaming audio to it all the time; see **Wake word
+detection** below.
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -246,7 +257,9 @@ Want your own word? Train a model with `oww_forge/` (see its README), then
 use the **+ Custom model** tile to upload the `.onnx` — it's stored in the
 controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
-deletes it.
+deletes it. The upload is checked first: a file that could not run as
+a wake word model is refused with the reason. That shows the model can run;
+whether it hears its word is for you to test by saying it.
 
 **If the device does its own wake word detection** (see *On-device wake
 word*), it needs the recogniser on it before it can listen for that word.
@@ -266,7 +279,8 @@ Home Assistant only reads a satellite's wake word configuration when it
 connects, so the controller drops and remakes that connection to make the new
 name show up. It takes a few milliseconds, but during it **every entity for
 that device goes unavailable and comes straight back** — the voice assistant,
-the media player, the action button, the ambient light sensor.
+the media player, the action button, the ambient light sensor and the
+Microphone Muted sensor.
 
 That matters if you have an automation using a **state trigger** on any of
 them: coming back online is a state change, and the automation will fire. The
@@ -288,21 +302,18 @@ you change the wake word.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
-used to start two competing conversations. Now the **first device to hear
-you answers immediately**, and any other device detecting the same word
-within this window (default 700ms) quietly stands down.
+used to start two competing conversations. Now **one answers**: the Echo
+that heard you loudest, which is normally the one in the room you are in.
+Any other Echo that heard the same word within this window (default 700ms)
+quietly stands down.
 
-There is **no latency cost**: the winner claims the turn on the spot rather
-than waiting out the window, so a solo wake is exactly as fast as it was
-before. The window only decides how long afterwards a second device counts
-as "the same utterance". `0` disables it, and it never applies when only
-one device is online.
+Choosing takes a moment. With two or more Echoes online, a wake waits up to a
+quarter of a second so that every Echo that heard it is counted. With one
+Echo there is no wait. The window itself only decides how long afterwards a
+second Echo counts as "the same utterance". `0` disables arbitration.
 
-An earlier version instead waited out the window and gave the turn to
-whichever device heard you *best*. That was dropped: it taxed every wake by
-~364ms even when nothing was competing, and field data showed the
-signal-to-noise winner produced a *worse* transcript than the device that
-simply heard you first.
+Before controller 2.26.0 the first Echo to hear the word answered.
+[listening.md](listening.md) has the reasons that changed.
 
 ### Wake sound
 Plays a short rising tone when the Echo hears the wake word. Off by
@@ -559,6 +570,11 @@ delete the files from the controller's `data/recordings/` folder.
 A turn recorded a while ago may show no buttons — that just means its
 recording has aged past the last 10 and the turn history has outlived it.
 
+**Wake word microphone** — which of the seven microphones listens for the
+wake word. **Centre** is right for nearly every Echo. MK1 to MK6 are the six
+around the edge, for an Echo whose centre microphone has failed and no longer
+wakes. Older firmware ignores it, and shows the control disabled.
+
 ---
 
 ## 04 — Ring
@@ -590,6 +606,26 @@ The volume arc holds the ring for about two seconds so a turn animation
 can't wipe it the instant it appears — but **pressing the action button
 cancels it immediately**, so adjusting the volume and then talking to the
 device still shows you the listening ring straight away.
+
+**Remote volume arc** is an opt-in accessibility setting. When enabled, a
+volume change from Home Assistant, an automation, the EchoMuse dashboard, or
+another remote player shows that same cyan arc. It is off by default because
+remote changes can otherwise make the ring light unexpectedly. Physical
+volume buttons always show the arc. Setting volume to zero (including Home
+Assistant mute), repeating the current level, and restoring the saved volume
+at boot never do. Older firmware shows the setting disabled until updated.
+
+### Remote volume arc
+The physical volume buttons always show the cyan level arc. With this on,
+the arc also shows for about two seconds when the volume is changed from
+somewhere else: Home Assistant, Music Assistant, an automation. Off by
+default. It never shows for volume zero (which is how Home Assistant mutes),
+for a repeat of the current level, or when the level is restored at start-up.
+Older firmware cannot do this, and shows the switch disabled.
+
+The arc and Home Assistant's slider do not agree about what "half" is: 50%
+from Home Assistant lights about a quarter of the ring. That is
+[#783](https://github.com/wilbowes/EchoMuse/issues/783).
 
 ### How a turn ends
 The ring tells you *why* a conversation stopped, using rhythm rather than
@@ -716,14 +752,46 @@ Two things to know before enabling:
   Android's stack** (it survives reboots). Nothing EchoMuse uses needs
   Android Bluetooth — but stock-style Bluetooth speaker pairing stops being
   possible on that device.
-- The proxy is **receive-only** (passive scanning). Devices that need an
-  active connection to read data (some smart locks, older BLE devices)
-  aren't supported — advert-based sensors and presence tracking are.
+- On its own the proxy is **receive-only** (passive scanning). Devices that
+  need a connection to read data or take commands need **Allow connections**
+  as well, below.
 - The Dot's WiFi and Bluetooth **share one antenna**, and scanning costs the
   WiFi link. So the scan **pauses automatically** while the Dot is hearing
   you, while a reply is arriving, and while its console or an update is
   running, then resumes; presence tracking loses a few seconds per voice
   turn.
+
+**Allow connections** — lets Home Assistant connect to Bluetooth devices
+through the Dot: smart locks, SwitchBot, anything that needs more than its
+advertisements. Off by default. It needs **Bluetooth proxy** on, and firmware
+that supports it (the toggle says so when it does not).
+
+Turning it on changes one thing you have to act on: **the proxy's Home
+Assistant connection becomes encrypted, and Home Assistant will ask for an
+encryption key.** Save the setting, press **Show encryption key** under the
+toggle (admin only), and paste it into Home Assistant when the `<label> BT
+Proxy` device asks to be reconfigured. Until you do, that proxy stops
+delivering advertisements too, because Home Assistant cannot connect to it.
+The key stays the same for that Dot from then on.
+
+The key is required, with no option to skip it: a connection can operate
+whatever is at the other end, and without it anything on your network could
+use the proxy to do so. Treat the key like a password. Turning connections
+off again makes the proxy unencrypted and ends any open connection.
+
+Limits to know:
+
+- **Three connections per Dot** at a time.
+- **No pairing.** Devices that require Bluetooth pairing (bonding) will
+  refuse; most locks and SwitchBot devices encrypt in their own app layer
+  and do not need it.
+- **A held connection costs presence tracking.** The scan shares the radio
+  with the connection: the Dot catches roughly half as many advertisements
+  while a connection is open. A connection goes to a slower rhythm after
+  five seconds idle to keep that cost down, so the first command after a
+  quiet spell takes about a second.
+- Connections end when the Dot loses its controller, and Home Assistant
+  reconnects them.
 
 Diagnostics live on the device's **Status tab** (Bluetooth proxy panel):
 scanner state, advertisements seen, nearby device count, and whether Home
@@ -840,12 +908,14 @@ These are set once, on the server, and need a controller restart to change:
 
 | Setting | What it is |
 |---|---|
-| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
+| `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. mDNS is advertised on this address's interface only, so Home Assistant has to be on the same network to discover the Echoes; if the address is not one of this host's, the controller says so in its log and advertises on every interface. |
+| `DB_PATH` | Where the database is kept. The device certificates and recordings are stored beside it. The published image defaults to `/app/data/echomuse.db`, the folder the compose files mount, so it survives an update with or without a `.env`. Bare-metal installs should set it. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
-| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 5 s, then **Approve pairing**). |
+| `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Don't set `0` once Echoes are paired: an Echo holding credentials will not fall back to the plain link. Devices switch to it automatically once they hold credentials: from the wizard, from approving a new device, or from pairing (hold the Echo's action button 7 s, or 5 s on firmware before v2.19.0, then **Approve pairing**). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 | `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — needed if Home Assistant, or a media server you stream from, is served over HTTPS with your own internal certificate authority. See below. |
+| `EM_TTS_WAIT_TIMEOUT` | Seconds to wait for Home Assistant's reply to begin before giving up on the turn — default 30, at most 120. Raise it if your conversation agent uses tools and needs longer. The add-on has the same setting as **Reply wait (seconds)**. |
 
 See `.env.example` for the complete list with comments.
 

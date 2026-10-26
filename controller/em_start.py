@@ -31,6 +31,8 @@ OPTIONS_PATH = Path("/data/options.json")
 # that quietly does nothing.
 OPTION_ENV_VARS = {
     "server_host": "SERVER_HOST",
+    "server_port": "SERVER_PORT",
+    "server_tls_port": "SERVER_TLS_PORT",
     "server_ip": "SERVER_IP",
     "mdns_name": "MDNS_NAME",
     "esphome_project_version": "ESPHOME_PROJECT_VERSION",
@@ -42,6 +44,7 @@ OPTION_ENV_VARS = {
     "debug": "DEBUG",
     "log_levels": "LOG_LEVELS",
     "extra_ca_cert": "EM_EXTRA_CA_CERT",
+    "tts_wait_timeout": "EM_TTS_WAIT_TIMEOUT",
 }
 
 if OPTIONS_PATH.is_file():

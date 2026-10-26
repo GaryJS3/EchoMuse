@@ -41,7 +41,7 @@ SETTLE_S = 25
 # Config keys the Echo runs in its output chain, and the field its report
 # shows each under (device/internal/outchain.Params).
 OUTPUT_FIELDS = {
-    "eqLoudness": "Loudness", "bassGuardEnabled": "GuardEnabled",
+    "bassGuardEnabled": "GuardEnabled",
     "bassGuardDb": "GuardDb", "limiterEnabled": "LimiterEnabled",
     "limiterThreshold": "LimiterThresholdDb", "limiterRelease": "LimiterReleaseMs",
 }

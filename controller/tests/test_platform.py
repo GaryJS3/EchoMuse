@@ -10,6 +10,7 @@ nothing anywhere reports a problem. That is the same silent-typo failure
 test_capabilities.py exists to prevent, so it is checked the same way.
 """
 
+import _sources
 import re
 import sys
 from pathlib import Path
@@ -150,9 +151,7 @@ def test_debloat_endpoint_refuses_server_side():
     the cost is not a no-op: the write lands nowhere, TRANSFER_OK never comes,
     and the transfer holds that device's shell lock for its whole timeout.
     """
-    src = _api_src()
-    body = src[src.index("async def _post_debloat"):]
-    body = body[:body.index("\ndef ")]
+    body = _sources.def_source("_post_debloat")
     assert "android_userspace" in body, \
         "_post_debloat does not check the base OS"
 
@@ -186,7 +185,7 @@ def test_transfer_checks_the_destination_directory():
     its full timeout holding the device's shell lock. Measured at 120s per
     attempt on EFF, 2026-09-04, three times in one evening.
     """
-    src = _api_src()
+    src = _sources.def_source("stream_file")
     assert "DESTDIR:missing" in src and "DESTDIR:ok" in src
 
 
@@ -199,15 +198,54 @@ def test_shell_lock_release_is_ownership_checked():
     the transfer still using it — two shell sessions on one device, which is
     what the lock exists to prevent.
     """
-    src = _api_src()
-    assert "_shell_owner" in src, "no ownership tracking for the shell lock"
-    helper = src[src.index("def _release_shell_lock"):]
-    helper = helper[:helper.index("\nasync def ")]
+    src = (ROOT / "controller" / "em_shell.py").read_text()
+    assert "owners" in src, "no ownership tracking for the shell lock"
+    helper = _sources.def_source("release_lock")
     assert "current_task()" in helper, \
-        "_release_shell_lock does not verify the caller owns the lock"
+        "release_lock does not verify the caller owns the lock"
 
     # And the bare release in the acquire path is gone: it fired on a lock
     # another task may already have released, raising "Lock is not acquired"
     # and surfacing as an empty result three steps away.
-    assert "_shell_lock[device_id].release()" not in src, \
+    assert "locks[device_id].release()" not in _sources.all_code(), \
         "an unguarded shell-lock release is back"
+
+
+def _probe(tmp_path, tools):
+    """Run the transfer's decoder probe in sh with only `tools` on PATH."""
+    import os, shutil, subprocess
+    import em_shell
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    for name, script in tools.items():
+        f = bin_ / name
+        if script is None:
+            os.symlink(shutil.which(name), f)
+        else:
+            f.write_text("#!/bin/sh\n" + script)
+            f.chmod(0o755)
+    out = subprocess.run(["/bin/sh", "-c", em_shell._DECODER_PROBE],
+                         env={"PATH": str(bin_)}, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def test_a_plain_base64_is_a_decoder(tmp_path):
+    """
+    The Dot 3 runs FireOS 6 with no busybox, and its toybox base64 is the only
+    decoder it has: without this tier the wake word models never installed on
+    one (41C8, 2026-10-25).
+    """
+    assert _probe(tmp_path, {"base64": None}) == "DECODER:base64"
+
+
+def test_busybox_still_comes_first(tmp_path):
+    assert _probe(tmp_path, {"base64": None,
+                             "busybox": 'shift; exec base64 "$@"'}) == "DECODER:busybox"
+
+
+def test_a_base64_that_does_not_decode_is_not_used(tmp_path):
+    assert _probe(tmp_path, {"base64": "cat"}) == "DECODER:none"
+
+
+def test_no_decoder_is_reported_as_none(tmp_path):
+    assert _probe(tmp_path, {}) == "DECODER:none"

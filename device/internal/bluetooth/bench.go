@@ -36,16 +36,16 @@ type BenchOptions struct {
 	BurstOn   time.Duration
 	BurstOff  time.Duration
 	OnAdverts func([]Advert)
-	Logf       func(format string, args ...any)
+	Logf      func(format string, args ...any)
 }
 
 // BenchSession opens /dev/stpbt, resets, sends the vendor commands, optionally
 // scans, and holds the controller up for Duration. The caller must ensure
 // nothing else owns /dev/stpbt.
 func BenchSession(o BenchOptions) error {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
 

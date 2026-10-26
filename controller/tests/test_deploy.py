@@ -6,6 +6,7 @@ forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
 2026-07-19).
 """
 
+import _sources
 import ast
 import re
 from pathlib import Path
@@ -24,6 +25,24 @@ def test_dockerfile_copies_every_controller_module():
     )
 
 
+def test_ci_runs_every_dashboard_test():
+    """
+    The dashboard job lists its tests by hand, so a new one that nobody adds to
+    the list passes locally and never runs in CI — green forever, testing
+    nothing. `device_tools.test.mjs` sat that way: written, passing, and run by
+    no job but a developer's own shell.
+
+    Same shape as the Dockerfile guard above, for the same reason: an
+    enumerated list is only honest while something checks it.
+    """
+    ci = (CONTROLLER.parent / ".github" / "workflows" / "ci.yml").read_text()
+    listed = set(re.findall(r"node\s+controller/tests/(\S+\.test\.mjs)", ci))
+    on_disk = {p.name for p in (CONTROLLER / "tests").glob("*.test.mjs")}
+    assert on_disk <= listed, (
+        f"dashboard tests on disk but never run by CI: {sorted(on_disk - listed)}"
+    )
+
+
 def test_dashboard_bundle_is_cache_busted():
     """
     /dashboard must not hand the browser a bare /static/dashboard.js URL.
@@ -39,9 +58,7 @@ def test_dashboard_bundle_is_cache_busted():
     import re
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    handler = src[src.index("async def _serve_dashboard"):]
-    handler = handler[:handler.index("\nasync def ", 1)]
+    handler = _sources.def_source("_serve_dashboard")
 
     assert "dashboard.js?v=" in handler, \
         "the bundle URL must carry a cache-busting token"
@@ -51,14 +68,13 @@ def test_dashboard_bundle_is_cache_busted():
     # mtime changes on every rebuild.
     # The token must be an mtime, not a version string: `version.py` reports
     # "dev" for every local build and so would never change between two of
-    # them. The stamp moved into _bundle_version() when /api/system/status
+    # them. The stamp moved into bundle_version() when /api/system/status
     # started publishing it for stale-tab detection, so the requirement is now
     # that the handler uses that ONE definition and that the definition is an
     # mtime — see test_the_bundle_stamp_has_exactly_one_definition.
-    assert "_bundle_version()" in handler, \
-        "the handler must take its token from _bundle_version()"
-    helper = src[src.index("def _bundle_version("):]
-    helper = helper[:helper.index("\nasync def ", 1)]
+    assert "bundle_version()" in handler, \
+        "the handler must take its token from bundle_version()"
+    helper = _sources.def_source("bundle_version")
     assert "st_mtime" in helper, \
         "cache-bust on the bundle's mtime, not on a version string"
 
@@ -78,7 +94,7 @@ def test_dashboard_paths_are_ingress_safe():
     index = (static / "index.html").read_text()
     dashboard = (static / "dashboard.html").read_text()
     jsx = (static / "dashboard.jsx").read_text()
-    api = (CONTROLLER / "em_api.py").read_text()
+    api = (CONTROLLER / "em_routes_static.py").read_text()
     config = (CONTROLLER / "config.yaml").read_text()
 
     for name, html in (("index.html", index), ("dashboard.html", dashboard)):
@@ -141,6 +157,41 @@ def test_addon_default_threshold_matches_the_controller():
     )
 
 
+def test_addon_default_reply_wait_matches_the_controller():
+    """
+    Same shape as the wake threshold above, and the same failure: config.yaml
+    ships the value a fresh add-on install meets, so a default that drifts
+    from em_turnclock's silently hands out a reply wait nobody chose.
+
+    The RANGE is pinned too, because the two halves of #805's ceiling live in
+    different files: the schema enforces it in the add-on UI, em_turnclock
+    clamps it for the standalone container, and both have to mean the same
+    number. The number itself is bounded by the thinking ring — see
+    `TTS_WAIT_MAX`.
+    """
+    import sys
+    sys.path.insert(0, str(CONTROLLER))
+    import em_turnclock
+
+    config = (CONTROLLER / "config.yaml").read_text()
+
+    default = re.search(r"^\s*tts_wait_timeout:\s*([0-9.]+)", config, re.M)
+    assert default, "config.yaml has no tts_wait_timeout option"
+    assert float(default.group(1)) == em_turnclock.TTS_WAIT_DEFAULT, (
+        f"config.yaml ships tts_wait_timeout {default.group(1)} but "
+        f"em_turnclock.TTS_WAIT_DEFAULT is {em_turnclock.TTS_WAIT_DEFAULT}"
+    )
+
+    rng = re.search(r'^\s*tts_wait_timeout:\s*"int\((\d+),(\d+)\)"',
+                    config, re.M)
+    assert rng, "schema has no tts_wait_timeout range"
+    assert float(rng.group(2)) == em_turnclock.TTS_WAIT_MAX, (
+        f"schema caps tts_wait_timeout at {rng.group(2)} but "
+        f"em_turnclock.TTS_WAIT_MAX is {em_turnclock.TTS_WAIT_MAX} — the "
+        f"add-on would accept a wait the controller then clamps"
+    )
+
+
 def test_addon_image_is_published_not_built_on_the_user_machine():
     """
     Without an `image:` key Supervisor builds the Dockerfile on whatever
@@ -182,17 +233,13 @@ def test_release_notes_survive_the_whole_relay():
     one.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-
-    fetch = api[api.index("async def _fetch_latest_release"):]
-    fetch = fetch[:fetch.index("\nasync def ", 1)]
+    fetch = _sources.def_source("fetch_firmware")
     assert 'release.get("body")' in fetch or '.get("body")' in fetch, \
         "the GitHub release body must be captured"
     assert 'set_config("latest_notes"' in fetch, "notes must be persisted"
 
-    cached = api[api.index("    # Load from DB cache"):]
-    cached = cached[:cached.index("\nasync def ", 1)] if "\nasync def " in cached else cached
-    assert 'get_config("latest_notes"' in cached, \
+    cached = _sources.def_source("cached_firmware")
+    assert '"latest_notes"' in cached and 'stored["latest_notes"]' in cached, \
         "the DB-cache path must restore notes, or they vanish on restart"
 
     jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
@@ -226,13 +273,15 @@ def test_every_device_payload_has_an_update_path():
     """
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
+    # The sync module, not em_api: the provisioning routes there name every
+    # payload too, and "installed only by the wizard" is the case this catches.
+    syncs = (root / "em_payloads.py").read_text()
     payloads = sorted(p.name for p in (root / "device_payloads").iterdir() if p.is_file())
     assert payloads, "device_payloads/ is empty — has it moved?"
 
     for name in payloads:
-        assert name in api, (
-            f"{name} has no update path: nothing in em_api.py references it. "
+        assert name in syncs, (
+            f"{name} has no update path: no sync in em_payloads.py references it. "
             f"A payload installed only by the provisioning wizard drifts on every "
             f"device already in the field."
         )
@@ -245,12 +294,10 @@ def test_debloat_sync_reconciles_both_halves():
     and changed nothing on any device.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _sync_debloat"):]
-    fn = fn[:fn.index("\nasync def ", 1)] if "\nasync def " in fn[1:] else fn
+    fn = _sources.def_source("sync_debloat")
 
     assert "echomuse-debloat.sh" in fn, "the boot script half must be synced"
-    assert "_debloat_packages()" in fn, "the pm-hide half must be reconciled"
+    assert "debloat_packages()" in fn, "the pm-hide half must be reconciled"
     assert "pm hide" in fn, "drifted packages must actually be hidden"
     # Rename-based replacement: the running shell keeps the old inode.
     assert "mv " in fn and ".new" in fn, \
@@ -265,11 +312,10 @@ def test_debloat_reachable_without_an_ota():
     which is the exact case that exposed the gap. A manual trigger is required,
     not a nicety.
     """
-    from pathlib import Path
-    root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
-    assert '"/api/devices/{id}/debloat"' in api, "no manual debloat endpoint registered"
-    jsx = (root / "static" / "dashboard.jsx").read_text()
+    # all_code() is unparsed, which writes every string single-quoted.
+    assert "'/api/devices/{id}/debloat'" in _sources.all_code(), \
+        "no manual debloat endpoint registered"
+    jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
     assert "/debloat`" in jsx, "the dashboard must be able to trigger it"
 
 
@@ -284,13 +330,11 @@ def test_stale_release_cache_is_not_returned_when_it_has_aged_out():
     interval, falling back to the stale value only if the fetch fails.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _get_cached_release"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("cached_firmware")
 
-    assert "await _fetch_latest_release()" in fn, \
+    assert "await fetch_firmware()" in fn, \
         "an aged-out cache must be refreshed synchronously, not in the background"
-    assert "asyncio.create_task(_fetch_latest_release())" not in fn, \
+    assert "create_task(fetch_firmware())" not in fn and "spawn(fetch_firmware())" not in fn, \
         "fire-and-forget refresh returns the stale value to this caller"
 
 
@@ -299,7 +343,7 @@ def test_release_change_is_pushed_to_open_dashboards():
     version until someone reloads."""
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
+    api = _sources.all_source()
     assert '"type":         "release_update"' in api or '"release_update"' in api, \
         "a release change must be broadcast on the event stream"
     jsx = (root / "static" / "dashboard.jsx").read_text()
@@ -434,10 +478,10 @@ def test_controller_update_is_advisory_only():
             f"{forbidden!r} — updating is the user's docker command to run"
         )
 
-    api = (root / "em_api.py").read_text()
+    api = _sources.all_source()
     assert 'add_get("/api/releases/controller"' in api, \
         "the controller release endpoint must be read-only (GET)"
-    for verb in ("add_post", "add_put", "add_delete"):
+    for verb in ("add_post", "add_put", "add_delete", "add_patch", "add_route"):
         assert f'{verb}("/api/releases/controller' not in api, \
             f"{verb} on /api/releases/controller would make the update actionable"
 
@@ -450,16 +494,14 @@ def test_controller_notes_come_from_the_tag_annotation():
     DEVICE firmware release instead — right shape, wrong product.
     """
     from pathlib import Path
-    api = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-    fn = api[api.index("async def _fetch_controller_release"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("fetch_controller")
     assert "GITHUB_TAGS_URL" in fn and "GITHUB_TAG_OBJECT_URL" in fn, \
         "controller notes must come from the tag annotation, not /releases"
     assert "GITHUB_API_URL" not in fn, \
         "that is the device firmware release feed, not the controller's"
 
 
-def test_every_db_call_in_em_api_exists():
+def test_every_db_call_exists():
     """
     A typo'd db.<name> is invisible to pyflakes (it is a valid attribute
     expression) and raises AttributeError only on the request that uses it.
@@ -473,9 +515,10 @@ def test_every_db_call_in_em_api_exists():
     from pathlib import Path
     root = Path(__file__).resolve().parent.parent
 
-    tree = ast.parse((root / "em_api.py").read_text())
+    # Every module that imports em_db as `db`, not only em_api: a function
+    # moved out of em_api keeps its db calls.
     used = {
-        n.attr for n in ast.walk(tree)
+        n.attr for path in _sources.MODULES for n in ast.walk(_sources.tree(path))
         if isinstance(n, ast.Attribute)
         and isinstance(n.value, ast.Name) and n.value.id == "db"
     }
@@ -494,7 +537,7 @@ def test_every_db_call_in_em_api_exists():
         if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
     }
     missing = sorted(used - defined)
-    assert not missing, f"em_api.py calls db.{{{', '.join(missing)}}} which em_db.py does not define"
+    assert not missing, f"db.{{{', '.join(missing)}}} is called but em_db.py does not define it"
 
 
 def test_the_wake_word_asset_wizard_step_is_mandatory():
@@ -597,8 +640,8 @@ def test_no_unjustified_hardcoded_media_state():
     Anything else must go through _media_state_msg(), which reads em_player
     truth.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
+    # Every module: a state message built outside em_esphome reaches HA too.
+    src = _sources.all_source()
 
     code = "\n".join(
         l for l in src.splitlines() if not l.lstrip().startswith("#")
@@ -726,9 +769,8 @@ def test_a_failed_update_asks_for_the_supervisor_log():
     # The failure paths live in _run_update_locked, which is what awaits
     # _monitor_reconnect and decides what its result means. (_run_update is
     # now the queue wrapper in front of it.)
-    monitor = api[api.index("async def _run_update_locked"):]
-    monitor = monitor[:monitor.index("\nasync def ", 1)]
-    assert monitor.count("_supervisor_log_wanted.add") >= 2, (
+    monitor = _sources.def_source("em_ota._run_update_locked")
+    assert monitor.count("supervisor_log_wanted.add") >= 2, (
         "both update-failure paths (auto-rollback and timeout) must request "
         "the supervisor log"
     )
@@ -783,8 +825,7 @@ def test_support_bundle_attributes_metrics_to_a_device():
     present in the bundle, useless for diagnosis, and wrong in the quiet way
     where the file still looks full of data. Shipped like that in #63.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    body = src.split("_get_support_bundle")[-1]
+    body = _sources.def_source("_get_support_bundle")
     call = re.search(r"metrics \+= \[(.*?)\]\n", body, re.S)
     assert call, "could not find where the support bundle collects metrics"
     assert "device_id" in call.group(1), (
@@ -800,10 +841,7 @@ def test_support_bundle_redacts_account_names():
     handler must therefore pass the user table to em_support; the redaction
     itself is tested in test_support.py.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    # "return web.Response", not "web.Response" — the latter is the handler's
-    # own return annotation and slices the body away to nothing.
-    body = src.split("_get_support_bundle")[-1].split("return web.Response")[0]
+    body = _sources.def_source("_get_support_bundle")
     assert "accounts=" in body and "get_all_users" in body, (
         "the support bundle must pass the real accounts to em_support — "
         "there is nothing in a log line to pattern-match them by"
@@ -822,8 +860,7 @@ def test_the_music_feed_reads_its_lead_per_chunk():
     module constant, silently restores the old behaviour and the fix becomes
     a no-op with every test still passing.
     """
-    src = (CONTROLLER / "em_player.py").read_text()
-    feed = src.split("async def _feed")[-1]
+    feed = _sources.def_source("em_player._feed")
     pacing = re.search(r"ahead = sent / BYTES_PER_SEC.*?await asyncio\.sleep\(([^)]*)\)",
                        feed, re.S)
     assert pacing, "could not find the feed's pacing sleep"
@@ -835,11 +872,17 @@ def test_the_music_feed_reads_its_lead_per_chunk():
 
 
 def _fn_body(src: str, name: str) -> str:
-    """Slice one async def out of a module's source, up to the next top-level def."""
-    start = src.index(f"async def {name}")
-    rest  = src[start + 1:]
-    end   = rest.index("\nasync def ") if "\nasync def " in rest else len(rest)
-    return src[start:start + 1 + end]
+    """The source of the one top-level function `name` in `src`, exactly.
+
+    It used to slice to the next `async def`, so it took in whatever came
+    after, and grew when the next function moved to another module: a guard
+    on _fetch_emos_payload passed on a check that lived in the function after
+    it (#921)."""
+    found = [n for n in ast.parse(src).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == name]
+    assert len(found) == 1, f"{name}: {len(found)} top-level definitions"
+    return ast.get_source_segment(src, found[0])
 
 
 def _js_fn_body(src: str, name: str) -> str:
@@ -879,8 +922,7 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     its old version. Shipping an unverified binary therefore costs a reboot and
     a rollback to learn nothing at all.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_stream_file_to_device")
+    fn  = _sources.def_source("stream_file")
 
     assert "hashlib.md5(data).hexdigest()" in fn, (
         "the transfer must hash what it actually sent — hashing anything else "
@@ -899,8 +941,8 @@ def test_firmware_transfer_is_verified_by_md5_not_by_an_exit_status():
     # Anchored on the CALL, not the function body: the docstring explains why
     # require_verify is set, so a body-wide search passes on the prose alone
     # while the argument is gone (caught by reintroducing exactly that).
-    slot = _fn_body(src, "_stream_binary_to_slot")
-    call = slot[slot.index("return await _stream_file_to_device"):]
+    slot = _sources.def_source("_stream_binary_to_slot")
+    call = slot[slot.index("return await em_shell.stream_file"):]
     assert "require_verify=True" in call, (
         "firmware is the payload where an unverifiable transfer must fail "
         "rather than proceed — it is the one we are about to boot"
@@ -913,7 +955,7 @@ def test_a_corrupt_binary_never_reaches_the_symlink_flip():
     a mismatch must be caught while the device is still running fine, not
     after it has taken a reboot and a rollback to tell us the same thing.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_ota.py").read_text()
     ota = src[src.index("_stream_binary_to_slot(live, binary"):]
     ota = ota[:ota.index("_monitor_reconnect")]
 
@@ -939,7 +981,7 @@ def test_ota_checks_free_space_before_writing_anything():
     disk — refusing on an unparsed reading blocks updates on any device whose
     df we have not seen.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_ota.py").read_text()
     ota = src[src.index("inactive_slot = "):src.index("_stream_binary_to_slot(live, binary")]
 
     assert "parse_free_mb" in ota, (
@@ -966,8 +1008,7 @@ def test_a_transfer_never_deletes_the_destination_before_sending():
     The `.part` discipline only protects `dest` from a CORRUPT transfer. It
     cannot protect it from being removed before the transfer starts.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_stream_file_to_device")
+    fn  = _sources.def_source("stream_file")
     code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
 
     assert "rm -f {dest}" not in code, (
@@ -992,14 +1033,14 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     one is a link problem worth retrying, the other is a property of the
     device that retrying cannot change.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = (CONTROLLER / "em_shell.py").read_text()
 
     assert "class TransferResult" in src and "__bool__" in src, (
         "the result must stay truthy so `if not await ...` call sites keep "
         "their meaning"
     )
 
-    fn = _fn_body(src, "_stream_file_to_device")
+    fn = _sources.def_source("stream_file")
     for stage in ("shell", "decoder", "send", "verify", "corrupt"):
         assert f'_transfer_failed("{stage}"' in fn, (
             f"the {stage} failure must be distinguishable from the others"
@@ -1010,7 +1051,8 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     )
 
     # The OTA message must carry the stage through rather than re-flattening it.
-    ota = src[src.index("_stream_binary_to_slot(live, binary"):]
+    api = (CONTROLLER / "em_ota.py").read_text()
+    ota = api[api.index("_stream_binary_to_slot(live, binary"):]
     ota = ota[:ota.index("_monitor_reconnect")]
     assert "{ok}" in ota, (
         "the update failure message must name the stage the transfer reached"
@@ -1024,9 +1066,9 @@ def test_a_failed_transfer_says_which_stage_it_failed_at():
     )
 
 
-def test_push_log_event_callers_do_not_also_persist():
+def test_push_log_callers_do_not_also_persist():
     """
-    `_push_log_event` persists AND pushes. A caller that also calls
+    `em_events.push_log` persists AND pushes. A caller that also calls
     `db.log_device` writes the line twice.
 
     That is not hypothetical: the device `log` handler did both, so every
@@ -1043,17 +1085,17 @@ def test_push_log_event_callers_do_not_also_persist():
     Checked by source shape because the alternative is importing
     em_controller, which the suite deliberately does not do.
     """
-    root = Path(__file__).resolve().parent.parent
-    for name in ("em_controller.py", "em_api.py"):
-        lines = (root / name).read_text().splitlines()
+    for path in _sources.MODULES:
+        name = path.name
+        lines = _sources.source(path).splitlines()
         for i, line in enumerate(lines):
-            if "_push_log_event(" not in line or "async def" in line:
+            if "em_events.push_log(" not in line or "async def" in line:
                 continue
             # The persist would sit just above the push, in the same block.
             window = lines[max(0, i - 6):i]
             offenders = [w.strip() for w in window if "db.log_device(" in w]
             assert not offenders, (
-                f"{name}:{i+1} calls _push_log_event, which already persists, "
+                f"{name}:{i+1} calls em_events.push_log, which already persists, "
                 f"but is preceded by {offenders[0]!r}. That writes the log "
                 f"line twice. Drop the db.log_device call."
             )
@@ -1085,10 +1127,9 @@ def test_bundle_live_state_carries_ambient_light_status():
     the field has to be put there by em_api. A reason that never reaches a
     bundle leaves us exactly where #90 started.
     """
-    root = Path(__file__).resolve().parent.parent
-    api = (root / "em_api.py").read_text()
-    assert '"ambient_light_status":' in api, (
-        "em_api's live_state must include ambient_light_status so support "
+    body = _sources.def_source("_get_support_bundle")
+    assert '"ambient_light_status":' in body, (
+        "the support bundle's live_state must include ambient_light_status so "
         "bundles can answer why a device reports no light sensor"
     )
 
@@ -1105,14 +1146,19 @@ def test_ingress_login_passes_the_real_deployment_flag_and_peer_address():
     test_ingressauth.py; this pins that it is actually consulted with real
     inputs.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("_post_ingress_login")
     call = re.search(
         r"em_ingressauth\.decide\((.*?)\)\s*\n", src, re.S)
-    assert call, "em_api no longer calls em_ingressauth.decide"
+    assert call, "_post_ingress_login no longer calls em_ingressauth.decide"
     args = call.group(1)
 
-    assert "ingress_only=INGRESS_ONLY" in args, (
-        "ingress_only must be the module's INGRESS_ONLY, never a literal")
+    assert "ingress_only=em_ingressauth.INGRESS_ONLY" in args, (
+        "ingress_only must be em_ingressauth.INGRESS_ONLY, never a literal")
+    # ...and that flag is the deployment's, read from the environment once.
+    flag = re.search(r"^INGRESS_ONLY = (.*)$",
+                     _sources.source(CONTROLLER / "em_ingressauth.py"), re.M)
+    assert flag and "ECHOMUSE_HOME_ASSISTANT_INGRESS" in flag.group(1), (
+        "INGRESS_ONLY must come from the add-on's environment")
     assert "remote=request.remote" in args, (
         "remote must be the live peer address, never a literal")
     for literal in ("ingress_only=True", "remote=em_ingressauth.INGRESS_GATEWAY_IP"):
@@ -1133,8 +1179,8 @@ def test_ingress_login_is_the_only_reader_of_the_remote_user_headers():
         text = path.read_text()
         if re.search(r'headers(?:\.get\(|\[)\s*["\']X-Remote-User', text):
             readers.append(path.name)
-    assert readers == ["em_api.py"], (
-        f"X-Remote-User headers read in {readers} — expected em_api.py only")
+    assert readers == ["em_routes_auth.py"], (
+        f"X-Remote-User headers read in {readers} — expected em_routes_auth.py only")
 
 
 def test_addon_panel_stays_admin_only():
@@ -1163,23 +1209,16 @@ def test_recordings_and_transcripts_are_admin_only():
     plain GET with a session token, so a UI-only rule protects nothing from
     anyone who opens the network tab.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-
-    audio = re.search(
-        r"(@auth\.require_\w+)\s*\nasync def _get_turn_audio\b", src)
-    assert audio, "_get_turn_audio not found"
-    assert audio.group(1) == "@auth.require_admin", (
+    _, audio = _sources.find_def("_get_turn_audio")
+    assert [ast.unparse(d) for d in audio.decorator_list] == ["auth.require_admin"], (
         "the utterance audio route must be admin-only")
 
-    turns = re.search(
-        r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
-        src, re.S)
-    assert turns and "_redact_turns_for" in turns.group(0), (
+    turns = _sources.def_source("_get_device_turns")
+    assert "_redact_turns_for" in turns, (
         "_get_device_turns must strip transcripts for non-admin sessions")
 
-    redact = re.search(r"def _redact_turns_for\(.*?\n(?=\n@|\ndef |\nasync def )",
-                       src, re.S)
-    assert redact and '"stt_text"' in redact.group(0), (
+    redact = _sources.def_source("_redact_turns_for")
+    assert '"stt_text"' in redact, (
         "_redact_turns_for must remove stt_text")
 
 
@@ -1191,11 +1230,7 @@ def test_role_changes_refuse_to_strand_the_install():
     the one an admin reaches for while tidying up.
 
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    handler = re.search(
-        r"async def _patch_user\b.*?\n(?=\n@|\ndef |\nasync def )", src, re.S)
-    assert handler, "_patch_user not found"
-    body = handler.group(0)
+    body = _strip_prose(_sources.def_source("_patch_user"))
 
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
@@ -1251,6 +1286,96 @@ def test_addon_options_are_wired_end_to_end():
     assert not mapped - options, (
         f"OPTION_ENV_VARS entries with no add-on option: "
         f"{sorted(mapped - options)}")
+
+
+# The .env.example variables that deliberately have no add-on option, each
+# carrying its reason. A bare list of names would rot the same way the option
+# table did — a variable nobody can account for looks exactly like one nobody
+# wanted, and the audit runs once.
+FIXED_IN_THE_ADDON = {
+    # config.yaml's `environment:` block pins this to /data/…, the add-on's own
+    # persistent storage. A user option could point the database anywhere,
+    # including somewhere that does not survive a restart.
+    "DB_PATH": "pinned to /data in config.yaml's environment: block",
+    # Must equal config.yaml's ingress_port (8768): Supervisor proxies the
+    # dashboard to that port, so any other value leaves ingress with nothing
+    # to forward to.
+    "API_PORT": "must equal config.yaml's ingress_port or ingress breaks",
+}
+
+
+def _env_example_vars() -> set[str]:
+    """
+    Every variable .env.example actually DEFINES. The file carries commented
+    examples too (`EM_EXTRA_CA_CERT=/certs/internal-ca.crt` in a block
+    describing docker-compose), and a commented line is not a variable the
+    controller offers.
+    """
+    defined = set()
+    for line in (CONTROLLER / ".env.example").read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, sep, _value = line.partition("=")
+        if sep and re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            defined.add(name)
+    return defined
+
+
+def test_every_env_var_reaches_the_addon_or_states_why_not():
+    """
+    The other half of test_addon_options_are_wired_end_to_end, which starts
+    from config.yaml and so cannot see a variable that never became an option.
+    This starts from .env.example — the list of settings a container user can
+    change — and demands each one be reachable under the add-on or carry a
+    stated reason it is fixed there.
+
+    The audit this replaces was a reading of CLAUDE.md, and it is exactly the
+    kind of check that rots: a missing option is invisible, because a setting
+    nobody wanted and a setting nobody added look the same from the outside.
+    SERVER_TLS_PORT sat that way for the life of the add-on: 8770 is the wss
+    port, it is advertised to devices, and no add-on user could move it or see
+    it was taken (#163).
+    """
+    start = (CONTROLLER / "em_start.py").read_text()
+    block = re.search(r"OPTION_ENV_VARS\s*=\s*\{(.*?)\}", start, re.S)
+    assert block, "em_start.py no longer defines OPTION_ENV_VARS"
+    pairs = dict(re.findall(r'"(\w+)"\s*:\s*"(\w+)"', block.group(1)))
+
+    # The inversion, and the reason this is not a one-liner: .env.example
+    # names the ENV VAR while OPTION_ENV_VARS maps OPTION -> ENV VAR, so it is
+    # the VALUES that answer "can an add-on user set this". Reading the keys
+    # instead would see `server_tls_port`, report SERVER_TLS_PORT as
+    # unreachable, and be silenced by listing it as fixed — the vacuous pass.
+    reachable = set(pairs.values())
+    defined = _env_example_vars()
+
+    unreachable = defined - reachable - set(FIXED_IN_THE_ADDON)
+    assert not unreachable, (
+        f".env.example variables with no add-on option: "
+        f"{sorted(unreachable)} — settable on the standalone container and "
+        f"unreachable under the add-on, which is the divergence #163 was "
+        f"about. Add an option (options + schema + translations/en.yaml + "
+        f"em_start.py's OPTION_ENV_VARS) or a reason in FIXED_IN_THE_ADDON.")
+
+    # The other direction, and the one OPTION_ENV_VARS' own keys cannot catch:
+    # an option mapped to an env var em_controller never reads is accepted,
+    # stored and displayed, and does nothing. That is the same quiet failure
+    # as a missing option, from the far end of the table.
+    unreadable = reachable - defined
+    assert not unreadable, (
+        f"OPTION_ENV_VARS values that .env.example does not define: "
+        f"{sorted(unreadable)} — em_controller.py reads no such env var, so "
+        f"the option would be stored and ignored")
+
+    for name, reason in FIXED_IN_THE_ADDON.items():
+        assert len(reason.split()) >= 4, (
+            f"FIXED_IN_THE_ADDON[{name!r}] needs a reason a reader can act "
+            f"on, not a placeholder")
+        assert name in defined, (
+            f"FIXED_IN_THE_ADDON lists {name}, which .env.example no longer "
+            f"defines — either the exclusion is stale or the file changed and "
+            f"this one needs re-deciding")
 
 
 def test_debug_env_var_is_not_truthy_for_zero():
@@ -1411,7 +1536,7 @@ def test_entity_names_do_not_repeat_the_device_label():
 
 def test_asset_sync_does_not_shadow_its_accumulator():
     """
-    _sync_oww_assets_locked keeps a `pushed` list of installed asset names. Assigning
+    em_oww_sync._sync_locked keeps a `pushed` list of installed asset names. Assigning
     the per-file transfer result to that same name shadowed the list on the
     FIRST file, so the append at the end of the loop raised
     AttributeError: 'TransferResult' object has no attribute 'append'
@@ -1425,15 +1550,11 @@ def test_asset_sync_does_not_shadow_its_accumulator():
     Found on hardware 2026-08-16: a device reporting "classifier model not
     installed" while the dashboard offered to send it and returned 500.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _sync_oww_assets_locked\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_sync_oww_assets_locked not found"
-    body = fn.group(0)
+    body = _sources.def_source("em_oww_sync._sync_locked")
 
     assert "pushed = []" in body, "the accumulator is gone"
     assert "pushed.append(" in body, "nothing accumulates installed names"
-    assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
+    assert not re.search(r"pushed\s*=\s*await\s+(em_shell\.)?stream_file", body), (
         "the transfer result must not be assigned to `pushed` — that shadows "
         "the accumulator and the append raises AttributeError")
 
@@ -1454,13 +1575,9 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
     The hold-back is invisible at the call site: the config push looks
     ordinary, and the whole guard is that one key was swapped out first.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _apply_live_config\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_apply_live_config not found"
-    body = fn.group(0)
+    body = _sources.def_source("apply_live_config")
 
-    hold = body.find("_hold_back_oww_model(live, effective)")
+    hold = body.find("em_oww_sync.hold_back_model(live, effective)")
     push = body.find('send_control({"type": "config"')
     assert hold != -1, "the new model is no longer held back"
     assert push != -1, "the config push is gone"
@@ -1468,7 +1585,7 @@ def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
         "the model must be held back BEFORE the config is pushed, or the "
         "device is told to use a model it does not have"
     )
-    assert "_install_then_switch" in body, "nothing installs the pending model"
+    assert "em_oww_sync.install_then_switch" in body, "nothing installs the pending model"
 
 
 def test_only_devices_that_score_locally_are_held_back():
@@ -1481,11 +1598,7 @@ def test_only_devices_that_score_locally_are_held_back():
     the same save that changes the wake word must not slip through on the
     strength of the old mode being "off".
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"def _hold_back_oww_model\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_hold_back_oww_model not found"
-    body = fn.group(0)
+    body = _sources.def_source("hold_back_model")
 
     assert "oww_shadow_capable" in body, (
         "a device that cannot score locally must not be held back"
@@ -1505,11 +1618,7 @@ def test_a_failed_install_leaves_the_device_on_its_old_wake_word():
     deaf device; standing the device down instead overrides the user's choice.
     Staying put means the device keeps answering, on a wake word it can hear.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn = re.search(r"async def _install_then_switch\(.*?\n(?=\nasync def |\ndef )",
-                   src, re.S)
-    assert fn, "_install_then_switch not found"
-    body = fn.group(0)
+    body = _sources.def_source("install_then_switch") + "\n"
 
     # The failure BRANCH itself, not the span up to the switch — that span
     # contains other returns, which is how the first version of this test
@@ -1628,10 +1737,8 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
         )
 
     for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
-        fn = re.search(rf"async def {fn_name}\(.*?\n(?=\nasync def |\ndef )",
-                       src, re.S)
-        assert fn, f"{fn_name} not found"
-        assert "_set_speaking(False)" in fn.group(0), (
+        fn = _sources.def_source(fn_name)
+        assert "_set_speaking(False)" in fn, (
             f"{fn_name} waits for the device's playback_stats and must be what "
             f"clears speaking"
         )
@@ -1758,8 +1865,7 @@ def test_deleting_a_device_bounces_its_link():
     (`control.go` Run), and a close issued first races that redial against
     the delete — it re-registers into the row being deleted and survives.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_delete_device")
+    fn  = _sources.def_source("_delete_device")
     # Comments stripped: this one explains the ordering it is pinning, and a
     # test that reads its own explanation as the code can be satisfied by
     # prose alone.
@@ -1789,8 +1895,7 @@ def test_deleting_a_device_drops_its_satellite():
     The BT proxy already had this (`em_ble_proxy.reconcile`); the satellite
     did not.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _fn_body(src, "_delete_device")
+    fn  = _sources.def_source("_delete_device")
     code = "\n".join(l for l in fn.splitlines() if not l.lstrip().startswith("#"))
 
     assert "em_esphome.device_deleted(device_id)" in code, (
@@ -1886,6 +1991,53 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     )
 
 
+def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
+    """
+    #417. `barge_ceded` covered two reasons and only the arbitration loss was
+    handled, so talking over an answer during an HA outage produced silence,
+    no cue and nothing in the Activity tab — indistinguishable from a device
+    that heard nothing. The wake path's stand-down records and cues; both barge
+    paths must not decide differently about it.
+
+    The record and the cue are NOT written where the barge fires. That block
+    runs before anything can unwind the turn, so the interrupted turn's own
+    `_persist_turn` overwrites `last_turn_outcome` with "barged" before the
+    ring reads it, and clearing `barge_detected` there skips the turn loop's
+    ceded branch — leaving `barge_ceded` and `cancel_event` set into the next
+    turn. So the watcher only CARRIES the reason across, and the loop's ceded
+    branch records it, by then with nothing left to overwrite it.
+
+    Source-shape because the suite cannot import em_controller, and the
+    decision itself is already covered by `em_barge.cede` — what is not
+    covered is whether the watcher acts on it, and where.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    for name in ("_barge_watcher", "_private_barge"):
+        fn = _fn_body(src, name)
+        assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
+        assert "(not serves) or won_by !=" not in fn, (
+            f"{name} has the decision inlined again — two copies of a "
+            f"stand-down rule can disagree about what leaves a record"
+        )
+        tail = fn[fn.index("em_barge.cede("):]
+        assert "verdict.no_ha:" in tail, (
+            f"{name} must branch on the no-HA reason separately from losing "
+            f"arbitration"
+        )
+        no_ha = tail[tail.index("verdict.no_ha:"):]
+        assert "device.barge_no_ha" in no_ha, (
+            f"{name}: the no-HA reason must reach the turn loop's ceded branch"
+        )
+        assert "record_dropped_wake" not in no_ha, (
+            f"{name}: recorded here, the row is overwritten by the interrupted "
+            f"turn's _persist_turn before _leds_turn_end can read it"
+        )
+        assert "device.barge_detected = False" not in no_ha, (
+            f"{name}: clearing this skips the ceded branch, so barge_ceded and "
+            f"cancel_event survive into the next turn"
+        )
+
+
 def test_every_outcome_cue_names_a_scene_key_that_exists():
     """
     `device.led_scene.get(key)` falls through to a dark ring when the key is
@@ -1929,35 +2081,34 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     has to be a global lock taken inside `_run_update`, so both entry points —
     the fleet deploy and a hand-clicked single update — go through it.
     """
-    src  = (CONTROLLER / "em_api.py").read_text()
-    body = _strip_prose(_fn_body(src, "_run_update"))
+    body = _strip_prose(_sources.def_source("em_ota.run_update"))
 
-    assert "_ota_lock.acquire()" in body, (
-        "_run_update must take the global OTA lock — a per-device guard does "
+    assert "queue.acquire()" in body, (
+        "run_update must take the global OTA lock — a per-device guard does "
         "not stop two devices updating at once"
     )
-    assert "_ota_lock.release()" in body, "the lock must be released"
+    assert "queue.release()" in body, "the lock must be released"
 
     # Nothing may reach the device before the lock is held, or the serialising
     # is decorative: the transfer is the expensive part, and it all lives
     # inside _run_update_locked.
-    acquire = body.index("_ota_lock.acquire()")
+    acquire = body.index("queue.acquire()")
     work    = body.index("_run_update_locked")
     assert acquire < work, (
         "the lock must be acquired BEFORE the update work starts"
     )
-    inner = _strip_prose(_fn_body(src, "_run_update_locked"))
+    inner = _strip_prose(_sources.def_source("em_ota._run_update_locked"))
     assert "_stream_binary_to_slot" in inner, (
         "the transfer must live inside the locked half"
     )
-    assert "_ota_lock" not in inner, (
+    assert not re.search(r"\bqueue\b", inner), (
         "the locked half must not touch the lock — one owner, or a release "
         "on a path that never acquired frees somebody else's turn"
     )
 
     # Bounded, or one wedged device holds the whole fleet's queue: the base64
     # send loop has no timeout of its own.
-    assert "OTA_MAX_HOLD_S" in body and "wait_for" in body, (
+    assert "MAX_HOLD_S" in body and "wait_for" in body, (
         "the locked half must run under a timeout — serialising turns a "
         "device-local stall into a fleet-wide one"
     )
@@ -1966,7 +2117,7 @@ def test_firmware_updates_are_serialised_across_the_whole_controller():
     # would otherwise hold the lock for the life of the process and no device
     # could ever be updated again without a restart.
     tail = body[body.rindex("finally:"):]
-    assert "_ota_lock.release()" in tail, (
+    assert "queue.release()" in tail, (
         "release the lock in the finally — a failed update must not strand "
         "every later one behind it"
     )
@@ -1978,17 +2129,17 @@ def test_a_queued_update_is_reported_as_queued_not_as_in_progress():
     that as `update_in_progress` claims a transfer that has not begun, which
     is the same failure as any control that appears to work and does not.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("merge_device")
     assert '"update_queued":' in src, (
         "/api/devices must expose update_queued, or the dashboard cannot tell "
         "waiting from working"
     )
 
-    body = _strip_prose(_fn_body(src, "_run_update"))
-    add     = body.index("_updates_queued.add")
-    acquire = body.index("_ota_lock.acquire()")
+    body = _strip_prose(_sources.def_source("em_ota.run_update"))
+    add     = body.index("queued.add")
+    acquire = body.index("queue.acquire()")
     assert add < acquire, "a device must be marked queued BEFORE it waits"
-    assert "_updates_queued.discard" in body, (
+    assert "queued.discard" in body, (
         "queued state must be cleared once the lock is held, or a device "
         "reads as queued for the whole of its own update"
     )
@@ -2047,7 +2198,9 @@ def test_the_control_plane_advert_message_is_still_handled():
     never to a wrong answer.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    assert 'msg_type == "ble_adverts"' in src, (
+    table = src[src.index("CONTROL_HANDLERS = {"):]
+    table = table[:table.index("}")]
+    assert '"ble_adverts":' in table, (
         "the control-plane ble_adverts message must stay handled for firmware "
         "that cannot use the data plane"
     )
@@ -2109,6 +2262,34 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
     )
 
 
+def test_the_no_ha_barge_records_where_nothing_overwrites_it():
+    """
+    The no-HA stand-down is the one barge outcome that must leave a row and a
+    cue, and both are written in the ceded branch for a reason that is only
+    visible as an ordering: the interrupted turn persists `barged` AFTER the
+    barge fires, so a row written at the point of the barge is overwritten
+    before the ring reads it. The branch also has to clear `barge_detected`
+    first, because `_leds_turn_end` suppresses its own cue while it is set.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    ceded = src.index("device.barge_detected and device.barge_ceded")
+    start = src.index("Barge-in: starting interrupting turn")
+    branch = src[ceded:start]
+    for call in ("leds_listening(device)", "record_dropped_wake(",
+                 "_leds_turn_end(device)"):
+        assert call in branch, f"the no-HA stand-down needs {call}"
+    assert branch.index("device.barge_detected = False") < \
+           branch.index("record_dropped_wake("), (
+        "the flag must be clear before the cue is painted, or "
+        "_leds_turn_end suppresses it"
+    )
+    cleanup = src.index("await cleanup_esphome()")
+    assert cleanup < ceded, (
+        "the record must come after the interrupted turn's cleanup has "
+        "persisted its own outcome, or that outcome overwrites this one"
+    )
+
+
 # ─── Connect-time reconcile ───────────────────────────────────────────────────
 #
 # Three payloads reach a device: the wake word assets, start_server.sh and the
@@ -2125,10 +2306,12 @@ def test_the_connect_handler_reconciles_all_three_payloads():
     that reaches a device on current firmware.
     """
     src = _strip_prose((CONTROLLER / "em_controller.py").read_text())
-    assert "api.reconcile_on_connect(" in src, (
-        "the connect handler must call api.reconcile_on_connect"
+    assert "em_reconcile.on_connect(" in src, (
+        "the connect handler must call em_reconcile.on_connect"
     )
-    assert "api.reconcile_oww_assets(" not in src, (
+    elsewhere = "\n".join(_sources.code_only(_sources.source(m))
+                          for m in _sources.MODULES if m.name != "em_reconcile.py")
+    assert "em_oww_sync.reconcile(" not in elsewhere, (
         "call the umbrella, not one payload — the other two then have no "
         "trigger that reaches a device already on the latest firmware"
     )
@@ -2139,10 +2322,9 @@ def test_the_reconcile_runs_the_three_payloads_sequentially():
     All three talk to one device over one shell plane. Gathering them contends
     for a single session for no gain — nothing is on a critical path here.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
 
-    for step in ("reconcile_oww_assets", "_sync_start_script", "_sync_debloat"):
+    for step in ("em_oww_sync.reconcile", "em_payloads.sync_start_script", "em_payloads.sync_debloat"):
         assert step in fn, f"{step} must run on connect"
     assert "asyncio.gather" not in fn, (
         "the three payloads share one shell plane — run them in order"
@@ -2155,8 +2337,7 @@ def test_one_failing_payload_does_not_skip_the_others():
     wake word models, so each step is caught individually rather than the loop
     being wrapped in one try.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._reconcile_payloads"))
     body = fn[fn.index("for name"):]
     assert "try:" in body and "except Exception" in body, (
         "each step must be caught inside the loop, not around it"
@@ -2170,13 +2351,11 @@ def test_the_reconcile_is_debounced_and_claimed_before_the_work():
     multi-megabyte push, and a device that reconnects mid-run must not start a
     second one against the same shell plane.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _strip_prose(_fn_body(src, "reconcile_on_connect"))
-    assert "_reconcile_due(" in fn, "the reconcile must be debounced per device"
+    fn  = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
+    assert "_due(" in fn, "the reconcile must be debounced per device"
 
-    decide = src[src.index("def _reconcile_due"):]
-    decide = _strip_prose(decide[:decide.index("\nasync def ")])
-    stamp  = decide.index("_last_reconcile[device_id] = now")
+    decide = _strip_prose(_sources.def_source("em_reconcile._due"))
+    stamp  = decide.index("stamps[device_id] = now")
     ret    = decide.index("return True")
     assert stamp < ret, "claim the debounce before returning, not after the work"
 
@@ -2188,10 +2367,9 @@ def test_emos_crash_logs_are_checked_on_connect_before_the_debounce():
     only for a device that positively reported emOS, which is what saves the
     ram console.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "reconcile_on_connect"))
+    fn = _strip_prose(_sources.def_source("em_reconcile.on_connect"))
     assert "_collect_crash_log(" in fn
-    assert fn.index("_collect_crash_log(") < fn.index("_reconcile_due(")
+    assert fn.index("_collect_crash_log(") < fn.index("_due(")
     gate = fn[:fn.index("_collect_crash_log(")]
     assert "not live.android_userspace" in gate
 
@@ -2201,11 +2379,10 @@ def test_the_crash_log_marker_is_written_only_after_a_complete_read():
     The marker says "this boot was examined". Writing it before the read
     completed would lose a crash to a dropped shell session.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_collect_crash_log"))
+    fn = _strip_prose(_sources.def_source("em_reconcile._collect_crash_log"))
     read = fn.index("cat {kmsg}")
-    assert fn.index("_SHELL_OK not in out") > read
-    assert fn.index("summarise(") > fn.index("_SHELL_OK not in out")
+    assert fn.index("em_shell.OK_MARK not in out") > read
+    assert fn.index("summarise(") > fn.index("em_shell.OK_MARK not in out")
     assert fn.index("> {seen}") > fn.index("summarise(")
 
 
@@ -2214,27 +2391,25 @@ def test_deleting_a_device_forgets_its_debounce():
     A re-added device is the one whose payloads are least likely to be right;
     inheriting the deleted row's stamp would skip its first reconcile.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_delete_device"))
-    assert "forget_reconcile(device_id)" in fn
+    fn = _strip_prose(_sources.def_source("_delete_device"))
+    assert "em_reconcile.forget(device_id)" in fn
 
 
 def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
     """
-    _shell_run swallows every exception and returns "" — so an absent md5 and
+    em_shell.run swallows every exception and returns "" — so an absent md5 and
     a device that never answered are the same string, and they want opposite
     actions. Without the marker, a shell plane that is not up yet (likely,
     seconds after connect) produces a push attempt and a user-visible "out of
     date" event that is not true.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    for name in ("_sync_start_script", "_sync_debloat"):
-        fn = _strip_prose(_fn_body(src, name))
-        assert "_SHELL_OK" in fn, (
+    for name in ("sync_start_script", "sync_debloat"):
+        fn = _strip_prose(_sources.def_source(name))
+        assert "em_shell.OK_MARK" in fn, (
             f"{name} must be able to tell a missing file from a silent device"
         )
         # The guard has to precede the push decision, or it guards nothing.
-        assert fn.index("_SHELL_OK not in out") < fn.index("_stream_file_to_device"), (
+        assert fn.index("em_shell.OK_MARK not in out") < fn.index("em_shell.stream_file"), (
             f"{name} must check the device answered BEFORE deciding to push"
         )
 
@@ -2250,8 +2425,7 @@ def test_the_payload_syncs_tell_a_missing_file_from_a_silent_device():
 # nothing guarded.
 
 def test_the_update_endpoint_refuses_a_version_the_device_already_runs():
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+    fn = _strip_prose(_sources.def_source("_post_device_update"))
 
     assert 'row["firmware_ver"] == release["version"]' in fn, (
         "the update endpoint must compare the target against what the device "
@@ -2270,14 +2444,13 @@ def test_a_refused_update_does_not_consume_the_uploaded_binary():
     Popping first meant a refusal cost an 11MB re-upload to act on the very
     advice the refusal had just given.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_device_update"))
+    fn = _strip_prose(_sources.def_source("_post_device_update"))
 
     assert "_pending_uploads.get(upload_token)" in fn, (
         "peek the token — every refusal below it must leave it usable"
     )
     pop = fn.index("_pending_uploads.pop")
-    run = fn.index("_run_update(")
+    run = fn.index("em_ota.run_update(")
     refuse = fn.index("already_running")
     assert refuse < pop, "the duplicate check must come before the token is consumed"
     assert pop < run, "consume the token only once the update is committed"
@@ -2289,10 +2462,9 @@ def test_the_fleet_endpoint_reads_the_version_out_of_an_uploaded_binary():
     no device had ever run — so `already_current` could never fire for one and
     a fleet push re-flashed every device with what it was already running.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-    fn  = _strip_prose(_fn_body(src, "_post_deploy_all"))
+    fn  = _strip_prose(_sources.def_source("_post_deploy_all"))
 
-    assert "_extract_binary_version(binary_override)" in fn, (
+    assert "em_ota.extract_binary_version(binary_override)" in fn, (
         "the fleet path must read the uploaded binary's own version"
     )
     assert "not upload_token and" not in fn, (
@@ -2305,9 +2477,8 @@ def test_the_upload_endpoint_reports_what_was_uploaded():
     The version rides back so the dashboard can warn at the point of deciding
     rather than after the operator has committed.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_upload_binary"))
-    assert "_extract_binary_version(binary)" in fn
+    fn = _strip_prose(_sources.def_source("_post_upload_binary"))
+    assert "em_ota.extract_binary_version(binary)" in fn
     assert '"version": version' in fn
 
 
@@ -2396,7 +2567,7 @@ def test_base_os_survives_the_device_going_offline():
     FireOS 5 slug would vanish whenever a device went offline — exactly when
     someone is trying to work out what it was. A live report still wins.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.def_source("merge_device")
     at = src.index('"baseOs":')
     line = src[at:src.index("\n", src.index("\n", at) + 1)]
     assert 'getattr(live, "base_os", None)' in line, "a live report must come first"
@@ -2554,7 +2725,7 @@ def test_the_serial_console_disables_echo_before_anything_else():
 
 def test_the_wizard_reads_the_device_list_the_way_the_api_returns_it():
     """
-    /api/devices returns a bare ARRAY (`_ok([...])`), not {devices: [...]}.
+    /api/devices returns a bare ARRAY (`em_http.ok([...])`), not {devices: [...]}.
 
     The emOS WiFi step read `.devices` off it, which is undefined, and the
     `|| []` turned that into an empty list on every pass — so its wait loop
@@ -2572,10 +2743,8 @@ def test_the_wizard_reads_the_device_list_the_way_the_api_returns_it():
         "/api/devices returns an array; reading .devices off it is silently "
         "undefined")
 
-    api = (CONTROLLER / "em_api.py").read_text()
-    handler = api[api.index("async def _get_devices"):]
-    handler = handler[:handler.index("\n@")] if "\n@" in handler else handler[:400]
-    assert "_ok([" in handler, (
+    handler = _sources.def_source("_get_devices")
+    assert "em_http.ok([" in handler, (
         "this test assumes /api/devices returns a bare list — if that changed, "
         "every caller in dashboard.jsx has to change with it")
 
@@ -2609,8 +2778,7 @@ def test_the_emos_build_endpoint_stores_nothing():
     care never to redistribute. Keeping a copy would mean holding a device
     image for no reason.
     """
-    fn = _strip_prose(_fn_body(
-        (CONTROLLER / "em_api.py").read_text(), "_post_provision_emos_image"))
+    fn = _strip_prose(_sources.def_source("_post_provision_emos_image"))
     for writer in ("open(", "write_bytes", "Path(", "tempfile"):
         assert writer not in fn, (
             f"the emOS build endpoint must not persist anything (found {writer!r})")
@@ -2628,9 +2796,7 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     failure if it broke would be the OTA offering an aarch64 init to a fleet
     of armv7a devices as a firmware update.
     """
-    src = (CONTROLLER / "em_api.py").read_text()
-
-    fw = _strip_prose(_fn_body(src, "_fetch_latest_release"))
+    fw = _strip_prose(_sources.def_source("fetch_firmware"))
     assert "_choose_firmware_release(" in fw, \
         "the firmware poll must select through version.choose_firmware_release"
     vsrc = (CONTROLLER / "version.py").read_text()
@@ -2640,8 +2806,11 @@ def test_the_emos_and_firmware_release_namespaces_cannot_select_each_other():
     assert 'startswith("v")' in chooser and '"server"' in chooser, \
         "the firmware poll must select on a v* tag AND a server asset"
 
-    emos = _strip_prose(_fn_body(src, "_fetch_latest_emos_release"))
-    assert 'startswith("emos-v")' in emos and '"init"' in emos, \
+    emos = _strip_prose(_sources.def_source("fetch_emos"))
+    assert "choose_release(" in emos, \
+        "the emOS poll must select through em_emos_update.choose_release"
+    chooser = _strip_prose(_sources.def_source("choose_release"))
+    assert 'startswith("emos-v")' in chooser and '"init"' in chooser, \
         "the emOS poll must select on an emos-v* tag AND an init asset"
 
     workflow = (CONTROLLER.parent / ".github" / "workflows" / "emos-release.yml").read_text()
@@ -2657,8 +2826,7 @@ def test_the_emos_init_is_verified_before_it_is_served():
     ways to get an init, and a check at only one is a way in that does not
     verify.
     """
-    api = (CONTROLLER / "em_api.py").read_text()
-    resolver = _strip_prose(_fn_body(api, "_fetch_one_init"))
+    resolver = _strip_prose(_sources.def_source("em_emos_ota._fetch_one_init"))
     assert "init_binary_problems" in resolver, (
         "the init must be checked for architecture/static before it is served")
     assert "bad_release_asset" in resolver
@@ -2668,13 +2836,13 @@ def test_the_emos_init_is_verified_before_it_is_served():
 
     # Every route to an init goes through that one function, so none of them can
     # serve an unchecked one.
-    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_init")), \
+    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_init")), \
         "the download endpoint's resolver must go through _fetch_one_init"
-    assert "_fetch_one_init" in _strip_prose(_fn_body(api, "_fetch_emos_payload")), \
+    assert "_fetch_one_init" in _strip_prose(_sources.def_source("em_emos_ota.fetch_payload")), \
         "the image endpoint's resolver must go through _fetch_one_init"
-    for name, want in (("_get_provision_emos_init", "_fetch_emos_init"),
-                       ("_post_provision_emos_image", "_fetch_emos_payload")):
-        fn = _strip_prose(_fn_body(api, name))
+    for name, want in (("_get_provision_emos_init", "em_emos_ota.fetch_init"),
+                       ("_post_provision_emos_image", "em_emos_ota.fetch_payload")):
+        fn = _strip_prose(_sources.def_source(name))
         assert want in fn, f"{name} must resolve through {want}"
 
 
@@ -2785,8 +2953,8 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # exact name, so renaming it strands every controller already in the field
     # looking for it — which is why the second init was ADDED as `init32`
     # rather than the pair being renamed to `init-arm64`/`init-arm`.
-    api = (CONTROLLER / "em_api.py").read_text()
-    mapping = api[api.index("EMOS_INIT_ASSETS = {"):]
+    ota = (CONTROLLER / "em_emos_ota.py").read_text()
+    mapping = ota[ota.index("INIT_ASSETS = {"):]
     mapping = mapping[:mapping.index("}") + 1]
     assert '"init"' in mapping and '"init32"' in mapping, (
         f"the arch-to-asset map must name the published assets, got: {mapping}")
@@ -2804,7 +2972,6 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
     rather than behaviour, the build step having no seam to test through.
     """
     jsx = (CONTROLLER / "static" / "dashboard.jsx").read_text()
-    api = (CONTROLLER / "em_api.py").read_text()
     build = _js_fn_body(jsx, "runBuildEmos")
 
     # The wizard asks the controller to resolve it, and does not fetch one to
@@ -2826,7 +2993,7 @@ def test_the_init_architecture_is_decided_where_the_reference_is():
     # The endpoint reads it off the reference, and refuses rather than
     # defaulting when it cannot: an init chosen by guess is the one failure with
     # no symptom on the device.
-    handler = _fn_body(api, "_post_provision_emos_image")
+    handler = _sources.def_source("_post_provision_emos_image")
     assert "reference_kernel_arch" in handler, (
         "the image endpoint must read the architecture off the reference")
     assert "unknown_reference_arch" in handler, (
@@ -2843,8 +3010,11 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
     Missing them on FireOS 6 is fatal, not degraded: Amazon's aborts under emOS,
     so the image would have no WiFi and no way to report it but a cable.
     """
-    api = (CONTROLLER / "em_api.py").read_text()
-    fn = _strip_prose(_fn_body(api, "_fetch_emos_payload"))
+    ota = (CONTROLLER / "em_emos_ota.py").read_text()
+    # The gate is in select_payload, which fetch_payload hands the release to.
+    assert "select_payload(" in _strip_prose(
+        _sources.def_source("em_emos_ota.fetch_payload"))
+    fn = _strip_prose(_sources.def_source("em_emos_ota.select_payload"))
     assert "ARCH_ARM" in fn, (
         "the WiFi tools must be gated on the reference's kernel architecture")
     assert "no_wifi_tools_for_arch" in fn, (
@@ -2859,12 +3029,12 @@ def test_the_wifi_tools_go_only_into_a_32_bit_image():
 
     # And all three travel together: em-wifi is useless without the two binaries
     # it drives, and wpa_cli alone would change which binary init's nudge uses.
-    assert "EMOS_SBIN_ASSETS" in fn, \
+    assert "SBIN_ASSETS" in fn, \
         "the tools must come from the one list, so they cannot diverge"
-    tools = api[api.index("EMOS_SBIN_ASSETS = ("):]
+    tools = ota[ota.index("\nSBIN_ASSETS = ("):]
     tools = tools[:tools.index(")") + 1]
     for name in ("wpa_supplicant", "wpa_cli", "em-wifi", "busybox"):
-        assert f'"{name}"' in tools, f"{name} missing from EMOS_SBIN_ASSETS"
+        assert f'"{name}"' in tools, f"{name} missing from SBIN_ASSETS"
 
 
 def test_a_v2_device_is_refused_by_the_fireos_flow_and_accepted_by_emos():
@@ -2906,8 +3076,8 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     The debloat payload is Android-only — a pm-hide list and a Magisk
     service.d script — and emOS has neither a package manager nor Magisk.
 
-    `_sync_debloat` has THREE call sites and for a while only two of them
-    asked. `reconcile_on_connect` gates on `live.android_userspace` and
+    `em_payloads.sync_debloat` has THREE call sites and for a while only two of them
+    asked. `em_reconcile.on_connect` gates on `live.android_userspace` and
     `_post_debloat` refuses with `not_android`, but the OTA path in
     `_run_update_locked` called it unconditionally. Found on EFF, 2026-09-07,
     at its first OTA after being moved to emOS: the transfer targeted
@@ -2925,9 +3095,8 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     """
     # Parsed, not grepped, so _strip_prose is neither needed nor wanted: an
     # AST contains no comments at all, and stripping them first breaks the
-    # parse on any line whose prose was load-bearing to the syntax.
-    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
-
+    # parse on any line whose prose was load-bearing to the syntax. Every
+    # module, so a call site that moves out of em_api is still asked.
     def gated(node) -> bool:
         """True when `android_userspace` is tested anywhere above this call."""
         for anc in ancestors.get(node, ()):
@@ -2936,18 +3105,19 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
         return False
 
     ancestors: dict = {}
-    for parent in ast.walk(tree):
-        for child in ast.iter_child_nodes(parent):
-            ancestors[child] = (parent,) + ancestors.get(parent, ())
-
-    calls = [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Name)
-        and n.func.id == "_sync_debloat"
-    ]
+    calls = []
+    for path in _sources.MODULES:
+        tree = _sources.tree(path)
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                ancestors[child] = (parent,) + ancestors.get(parent, ())
+        calls += [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and getattr(n.func, "attr", getattr(n.func, "id", None)) == "sync_debloat"
+        ]
     assert len(calls) >= 3, (
-        f"expected at least three _sync_debloat call sites, found {len(calls)} — "
+        f"expected at least three sync_debloat call sites, found {len(calls)} — "
         "if one was removed, update this test rather than deleting it"
     )
 
@@ -2964,7 +3134,7 @@ def test_every_debloat_push_asks_which_userspace_the_device_booted():
     }
     ungated = [ln for ln in ungated if enclosing[ln] != "_post_debloat"]
     assert not ungated, (
-        "these _sync_debloat call sites do not check android_userspace: "
+        "these sync_debloat call sites do not check android_userspace: "
         + ", ".join(f"line {ln} in {enclosing[ln]}()" for ln in ungated)
         + " — an emOS device has no package manager to hide packages from and "
           "no Magisk daemon to have created the service.d directory."
@@ -2989,23 +3159,20 @@ def test_the_bundle_stamp_has_exactly_one_definition():
     from the API — so the one number somebody checks to rule this out was the
     number lying to them (2026-09-10).
     """
-    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
-
-    assert src.count("def _bundle_version(") == 1, (
-        "_bundle_version must be the single definition of the bundle stamp")
-    assert '"bundle_version": _bundle_version()' in src, (
-        "/api/system/status must publish the stamp via _bundle_version(), so "
+    _sources.find_def("bundle_version")   # exactly one, in any module
+    status = _sources.def_source("_get_system_status")
+    assert '"bundle_version": em_routes_static.bundle_version()' in status, (
+        "/api/system/status must publish the stamp via bundle_version(), so "
         "the page can compare what it loaded against what is being served")
 
     # The URL stamp must come from the same call, not a second stat().
-    serve = src[src.index("async def _serve_dashboard"):]
-    serve = serve[:serve.index("async def _redirect_root")]
-    assert "_bundle_version()" in serve, (
-        "_serve_dashboard must stamp the URL from _bundle_version() rather "
+    serve = _sources.def_source("_serve_dashboard")
+    assert "bundle_version()" in serve, (
+        "_serve_dashboard must stamp the URL from bundle_version() rather "
         "than re-deriving the mtime")
     assert "st_mtime" not in serve, (
         "_serve_dashboard re-derives the bundle mtime — that is the drift "
-        "this test exists to prevent; use _bundle_version()")
+        "this test exists to prevent; use bundle_version()")
 
 
 def test_the_stale_bundle_check_does_not_refresh_the_displayed_version():
@@ -3056,13 +3223,36 @@ def test_asset_installs_queue_behind_the_ota_lock():
     take the same global lock, and only the wrapper may reach the unlocked body.
     """
     import ast
-    src = (CONTROLLER / "em_api.py").read_text()
-    tree = ast.parse(src)
-    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
-    wrapper = fns["_sync_oww_assets"]
-    assert any(isinstance(n, ast.AsyncWith) and "_ota_lock" in ast.unparse(n.items[0].context_expr)
-               for n in ast.walk(wrapper)), "_sync_oww_assets does not take _ota_lock"
-    callers = [name for name, fn in fns.items()
-               if name not in ("_sync_oww_assets", "_sync_oww_assets_locked")
-               and "_sync_oww_assets_locked(" in ast.unparse(fn)]
+    # Every module: a caller of the unlocked body is a caller wherever it is.
+    _, wrapper = _sources.find_def("em_oww_sync.sync")
+    _sources.find_def("em_oww_sync._sync_locked")   # the body exists to be guarded
+    assert any(isinstance(n, ast.AsyncWith) and "em_ota.queue" in ast.unparse(n.items[0].context_expr)
+               for n in ast.walk(wrapper)), "em_oww_sync.sync does not take em_ota.queue"
+    callers = [f"{path.name}:{fn.name}" for path in _sources.MODULES
+               for fn in ast.walk(_sources.tree(path))
+               if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and fn is not wrapper and fn.name != "_sync_locked"
+               and "_sync_locked(" in ast.unparse(fn)]
     assert not callers, f"unlocked asset sync called from {callers}"
+
+
+def test_the_image_keeps_its_data_on_the_mounted_directory():
+    """
+    #629: with no .env, DB_PATH fell back to the relative "echomuse.db", which
+    in the image is /app, outside the ./data:/app/data volume. The database,
+    the device-link CA and the recordings were lost on every recreate.
+
+    Read from the Dockerfile's instructions, not its comments.
+    """
+    root = Path(__file__).resolve().parent.parent
+    instructions = [ln.strip() for ln in (root / "Dockerfile").read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "ENV DB_PATH=/app/data/echomuse.db" in instructions
+    # sqlite will not create the directory, and without a volume nothing else does.
+    assert any(ln.startswith("RUN mkdir -p") and "/app/data" in ln.split()
+               for ln in instructions)
+    # The directory the default points at is the one both compose files mount.
+    for compose in ("docker-compose.yml", "docker-compose.deploy.yml"):
+        assert ":/app/data" in (root / compose).read_text(), compose
+    # The add-on keeps its own path, which has to win over the image's.
+    assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()

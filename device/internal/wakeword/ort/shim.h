@@ -333,6 +333,150 @@ static char *em_vad_run(em_model *m, const float *x, size_t n,
 	return err;
 }
 
+/*
+ * The streaming embedding model (#893): openWakeWord's embedding rewritten by
+ * controller/tools/oww_stream.py to take the 8 mel frames that are new and
+ * carry the rest as state. Inputs `mel` [1,8,32,1] and `state_0..state_N`;
+ * outputs `embedding` [1,96] and `state_0_next..state_N_next`. How many states
+ * there are and their shapes are read from the model, so a change to the
+ * rewrite needs no change here.
+ *
+ * The states are one Go-owned buffer, read as the carried state and
+ * overwritten with the next, as em_vad_run does.
+ */
+#define EM_STREAM_MAX 16
+#define EM_STREAM_STEP (8 * 32)
+#define EM_STREAM_EMB 96
+
+typedef struct {
+	em_model m;
+	int n;
+	size_t total; /* floats across all states */
+	char in_names[EM_STREAM_MAX + 1][24];
+	char out_names[EM_STREAM_MAX + 1][24];
+	int64_t shape[EM_STREAM_MAX][4];
+	size_t len[EM_STREAM_MAX];
+	size_t off[EM_STREAM_MAX];
+} em_stream;
+
+static char *em_stream_load(em_runtime *r, const char *path, int threads, int xnnpack,
+                            int allow_spinning, em_stream *out) {
+	memset(out, 0, sizeof(*out));
+	char *err = em_model_load(r, path, threads, xnnpack, allow_spinning, &out->m);
+	if (err) return err;
+	const OrtApi *api = out->m.api;
+
+	OrtAllocator *al = NULL;
+	size_t n_in = 0, n_out = 0;
+	if ((err = em_err(api, api->GetAllocatorWithDefaultOptions(&al))) ||
+	    (err = em_err(api, api->SessionGetInputCount(out->m.sess, &n_in))) ||
+	    (err = em_err(api, api->SessionGetOutputCount(out->m.sess, &n_out))))
+		return err;
+	if (n_in < 2 || n_in > EM_STREAM_MAX + 1 || n_out != n_in)
+		return em_dup("not a streaming embedding model: wrong number of inputs or outputs");
+	out->n = (int)n_in - 1;
+
+	int seen_mel = 0;
+	unsigned seen = 0;
+	for (size_t i = 0; i < n_in && !err; i++) {
+		char *name = NULL;
+		if ((err = em_err(api, api->SessionGetInputName(out->m.sess, i, al, &name)))) break;
+		int k = -1;
+		char tail = 0;
+		if (strcmp(name, "mel") == 0) {
+			seen_mel = 1;
+		} else if (sscanf(name, "state_%d%c", &k, &tail) == 1 && k >= 0 && k < out->n) {
+			OrtTypeInfo *ti = NULL;
+			const OrtTensorTypeAndShapeInfo *tsi = NULL;
+			size_t nd = 0;
+			if (!(err = em_err(api, api->SessionGetInputTypeInfo(out->m.sess, i, &ti)))) {
+				if (!(err = em_err(api, api->CastTypeInfoToTensorInfo(ti, &tsi))) &&
+				    !(err = em_err(api, api->GetDimensionsCount(tsi, &nd)))) {
+					if (nd != 4)
+						err = em_dup("not a streaming embedding model: a state is not 4-dimensional");
+					else
+						err = em_err(api, api->GetDimensions(tsi, out->shape[k], 4));
+				}
+				api->ReleaseTypeInfo(ti);
+			}
+			if (!err) {
+				size_t len = 1;
+				for (int d = 0; d < 4; d++) {
+					if (out->shape[k][d] <= 0 || out->shape[k][d] > 4096) {
+						err = em_dup("not a streaming embedding model: a state has no fixed size");
+						break;
+					}
+					len *= (size_t)out->shape[k][d];
+				}
+				out->len[k] = len;
+				seen |= 1u << k;
+			}
+		} else {
+			err = em_dup("not a streaming embedding model: unexpected input");
+		}
+		api->ReleaseStatus(api->AllocatorFree(al, name));
+	}
+	if (!err && (!seen_mel || seen != (1u << out->n) - 1))
+		err = em_dup("not a streaming embedding model: inputs are not mel and state_0..state_N");
+	if (err) return err;
+
+	snprintf(out->in_names[0], 24, "mel");
+	snprintf(out->out_names[0], 24, "embedding");
+	for (int k = 0; k < out->n; k++) {
+		snprintf(out->in_names[k + 1], 24, "state_%d", k);
+		snprintf(out->out_names[k + 1], 24, "state_%d_next", k);
+		out->off[k] = out->total;
+		out->total += out->len[k];
+	}
+	return NULL;
+}
+
+/* em_stream_run advances the model by one step. `state` holds `total` floats. */
+static char *em_stream_run(em_stream *s, const float *mel, float *state, float *emb) {
+	const OrtApi *api = s->m.api;
+	if (!api || !s->m.sess) return em_dup("model is closed");
+
+	OrtMemoryInfo *mi = NULL;
+	char *err = em_err(api, api->CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, &mi));
+	if (err) return err;
+
+	const int64_t ms[] = {1, 8, 32, 1};
+	OrtValue *in[EM_STREAM_MAX + 1], *out[EM_STREAM_MAX + 1];
+	const char *in_names[EM_STREAM_MAX + 1], *out_names[EM_STREAM_MAX + 1];
+	memset(in, 0, sizeof(in));
+	memset(out, 0, sizeof(out));
+	for (int i = 0; i <= s->n; i++) {
+		in_names[i] = s->in_names[i];
+		out_names[i] = s->out_names[i];
+	}
+	err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, (void *)mel, EM_STREAM_STEP * sizeof(float),
+	                      ms, 4, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in[0]));
+	for (int k = 0; k < s->n && !err; k++)
+		err = em_err(api, api->CreateTensorWithDataAsOrtValue(mi, state + s->off[k],
+		                      s->len[k] * sizeof(float), s->shape[k], 4,
+		                      ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &in[k + 1]));
+	api->ReleaseMemoryInfo(mi);
+
+	if (!err) err = em_err(api, api->Run(s->m.sess, NULL, in_names, (const OrtValue *const *)in,
+	                                     (size_t)s->n + 1, out_names, (size_t)s->n + 1, out));
+	for (int i = 0; i <= s->n; i++)
+		if (in[i]) api->ReleaseValue(in[i]);
+
+	/* Every output is read before any state is overwritten, so an error part
+	 * way leaves the carried state as it was. */
+	float *p[EM_STREAM_MAX + 1];
+	for (int i = 0; i <= s->n && !err; i++)
+		err = em_err(api, api->GetTensorMutableData(out[i], (void **)&p[i]));
+	if (!err) {
+		memcpy(emb, p[0], EM_STREAM_EMB * sizeof(float));
+		for (int k = 0; k < s->n; k++)
+			memcpy(state + s->off[k], p[k + 1], s->len[k] * sizeof(float));
+	}
+	for (int i = 0; i <= s->n; i++)
+		if (out[i]) api->ReleaseValue(out[i]);
+	return err;
+}
+
 static void em_model_free(em_model *m) {
 	const OrtApi *api = m->api;
 	if (!api || !m->sess) return;
@@ -358,5 +502,7 @@ static void em_model_free(em_model *m) {
 		m->out_name = NULL;
 	}
 }
+
+static void em_stream_free(em_stream *s) { em_model_free(&s->m); }
 
 #endif /* EM_ORT_SHIM_H */

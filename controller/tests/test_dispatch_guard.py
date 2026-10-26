@@ -22,7 +22,7 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def _control_loop_src() -> str:
     src = (CONTROLLER / "em_controller.py").read_text()
-    start = src.index('                if msg_type == "button":')
+    start = src.index("handler = CONTROL_HANDLERS.get(msg_type)")
     return src[start:start + 60_000]
 
 
@@ -62,6 +62,6 @@ def test_register_failure_stays_fatal():
     """
     src = (CONTROLLER / "em_controller.py").read_text()
     register = src.index('msg.get("type") != "register"')
-    guarded = src.index('                if msg_type == "button":')
+    guarded = src.index("handler = CONTROL_HANDLERS.get(msg_type)")
     assert register < guarded, \
         "register must be handled before the per-message guard starts"

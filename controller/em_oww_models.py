@@ -16,8 +16,10 @@ it can be unit-tested; the HTTP endpoints in em_api.py are thin wrappers.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
+import sys
 from pathlib import Path
 
 MODELS_SUBDIR = "oww_models"
@@ -39,6 +41,21 @@ def prediction_key(model_name: str) -> str:
     if model_name.endswith(".onnx"):
         return Path(model_name).stem
     return model_name
+
+
+def scalar_score(value) -> float:
+    """
+    One score as a plain float, whatever shape the classifier's output has.
+
+    openwakeword reads `prediction[0][0][0]`, a scalar for its own models,
+    whose output is [batch, 1]. A model exported with [batch, 1, 1]
+    (nanowakeword does) leaves a one-element array there, which compares
+    like a number and then fails in an f-string or json.dumps (#869). The
+    first element is also what the firmware reads, so both halves score a
+    model the same way.
+    """
+    ravel = getattr(value, "ravel", None)
+    return float(ravel()[0] if ravel is not None else value)
 
 
 # openWakeWord ships its stock models with a version suffix in the FILENAME
@@ -132,3 +149,34 @@ def in_use_by(model_path: str, configs: dict[str, dict]) -> list[str]:
         if str(Path(ref).resolve()) == target:
             users.append(scope)
     return users
+
+
+def resources_dir() -> Path | None:
+    """
+    openwakeword's bundled models directory, found WITHOUT importing the
+    package: its __init__ imports a training helper that pulls in
+    scikit-learn and scipy, ~120 MB and ~2 s, which a controller whose Echoes
+    all detect their own wake word never needs. None when it is not installed.
+    """
+    mod = sys.modules.get("openwakeword")
+    if mod is not None and getattr(mod, "__file__", None):
+        base = Path(mod.__file__).parent
+    else:
+        try:
+            spec = importlib.util.find_spec("openwakeword")
+        except (ImportError, ValueError):
+            return None
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        base = Path(list(spec.submodule_search_locations)[0])
+    d = base / "resources" / "models"
+    return d if d.is_dir() else None
+
+
+def model_class():
+    """openwakeword's Model, imported on first use. Call it only from the
+    executor threads that build a model: the import costs ~120 MB and ~2 s,
+    and a controller whose Echoes all detect their own wake word never
+    builds one."""
+    from openwakeword.model import Model
+    return Model

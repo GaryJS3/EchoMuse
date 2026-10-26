@@ -26,6 +26,8 @@ type Board struct {
 	DeviceTypeID string
 	// Tuning is the platform policy applied at boot on emOS. Nil means none.
 	Tuning *Tuning
+	// Hardware is where this board's parts are found. See hardware.go.
+	Hardware *Hardware
 }
 
 // Biscuit is the Echo Dot 2nd gen (MT8163). The same id was read off devices
@@ -34,10 +36,28 @@ var Biscuit = &Board{
 	ID:           "biscuit",
 	DeviceTypeID: "A3S5BH2HU6VAYF",
 	Tuning:       biscuitTuning,
+	Hardware:     biscuitHardware,
+}
+
+// Radar is the Echo 2nd gen (full size, 2017). Its id was read off 035T
+// (FireOS 6). No Tuning: emOS runs the kernel's thermal defaults, which are
+// the stricter side.
+var Radar = &Board{
+	ID:           "radar",
+	DeviceTypeID: "A7WXQPH584YP",
+	Hardware:     radarHardware,
+}
+
+// Donut is the Echo Dot 3rd gen (MT8167, 2018). Its id was read off 41C8
+// (FireOS 6). No Tuning.
+var Donut = &Board{
+	ID:           "donut",
+	DeviceTypeID: "A32DOYMUN6DTXA",
+	Hardware:     donutHardware,
 }
 
 // Known is every board the firmware can identify.
-var Known = []*Board{Biscuit}
+var Known = []*Board{Biscuit, Radar, Donut}
 
 // Detect returns the board beneath root, or nil when none matches. root is ""
 // on a device and a fixture directory in tests.

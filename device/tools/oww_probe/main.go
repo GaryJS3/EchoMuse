@@ -3,18 +3,18 @@
 //
 // It answers the two questions the host tests cannot:
 //
-//	1. Does the ONNX Runtime binding actually work on this hardware? The probe
-//	   runs fixture.Verify — the SAME comparison the host test runs, against
-//	   the same golden capture of openWakeWord's Python output — so a pass here
-//	   means the real pipeline reproduces Python on ARM, not merely on x86.
+//  1. Does the ONNX Runtime binding actually work on this hardware? The probe
+//     runs fixture.Verify — the SAME comparison the host test runs, against
+//     the same golden capture of openWakeWord's Python output — so a pass here
+//     means the real pipeline reproduces Python on ARM, not merely on x86.
 //
-//	2. What does it cost in the shape it will really run? Not flat-out latency,
-//	   which is the misleading number: the wake stream is duty-cycled at 12.5Hz,
-//	   and ORT's thread pool can burn several times the inference cost
-//	   spin-waiting in the gaps. So the second phase paces frames at real time
-//	   and reports process CPU from getrusage. That also captures what a C
-//	   benchmark cannot — cgo call overhead and Go GC pressure from the
-//	   buffering.
+//  2. What does it cost in the shape it will really run? Not flat-out latency,
+//     which is the misleading number: the wake stream is duty-cycled at 12.5Hz,
+//     and ORT's thread pool can burn several times the inference cost
+//     spin-waiting in the gaps. So the second phase paces frames at real time
+//     and reports process CPU from getrusage. That also captures what a C
+//     benchmark cannot — cgo call overhead and Go GC pressure from the
+//     buffering.
 //
 // Nothing here touches the microphone, the LEDs, or the running server. It
 // reads three model files, a fixture, and the ONNX Runtime shared library, and
@@ -56,6 +56,8 @@ func main() {
 		threads  = flag.Int("threads", 1, "intra-op threads")
 		xnnpack  = flag.Bool("xnnpack", true, "use the XNNPACK execution provider")
 		spinning = flag.Bool("spinning", false, "leave ORT's thread-pool spin-wait enabled (the costly default)")
+		stream   = flag.String("stream", "", "streaming embedding model (default: embedding_stream.onnx in -models, if it is there)")
+		noStream = flag.Bool("no-stream", false, "use the stock embedding model even if a streaming one is present")
 	)
 	flag.Parse()
 
@@ -64,14 +66,29 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := run(*lib, *modelDir, *clsPath, *fxPath, *seconds,
+	streamPath := *stream
+	if streamPath == "" {
+		if p := filepath.Join(*modelDir, "embedding_stream.onnx"); exists(p) {
+			streamPath = p
+		}
+	}
+	if *noStream {
+		streamPath = ""
+	}
+
+	if err := run(*lib, *modelDir, *clsPath, *fxPath, streamPath, *seconds,
 		ort.Options{Threads: *threads, XNNPACK: *xnnpack, AllowSpinning: *spinning}); err != nil {
 		fmt.Fprintf(os.Stderr, "oww_probe: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(lib, modelDir, clsPath, fxPath string, seconds int, opts ort.Options) error {
+func exists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
+}
+
+func run(lib, modelDir, clsPath, fxPath, streamPath string, seconds int, opts ort.Options) error {
 	fx, err := fixture.LoadORT(fxPath)
 	if err != nil {
 		return err
@@ -87,6 +104,8 @@ func run(lib, modelDir, clsPath, fxPath string, seconds int, opts ort.Options) e
 		Melspec:    filepath.Join(modelDir, "melspectrogram.onnx"),
 		Embedding:  filepath.Join(modelDir, "embedding_model.onnx"),
 		Classifier: clsPath,
+
+		EmbeddingStream: streamPath,
 	}, opts)
 	if err != nil {
 		return err
@@ -96,6 +115,12 @@ func run(lib, modelDir, clsPath, fxPath string, seconds int, opts ort.Options) e
 	fmt.Printf("runtime   onnxruntime %s\n", rt.Version())
 	fmt.Printf("session   threads=%d xnnpack=%v(requested %v) spinning=%v\n",
 		opts.Threads, inf.XNNPACKActive(), opts.XNNPACK, opts.AllowSpinning)
+	fmt.Printf("embedding streaming: %s\n", inf.StreamStatus())
+	if streamPath != "" && !inf.Streaming() {
+		// The probe was asked to measure the streaming model. Carrying on
+		// would report the stock model's cost under its name.
+		return fmt.Errorf("streaming embedding model %s is not usable: %s", streamPath, inf.StreamStatus())
+	}
 	if opts.XNNPACK && !inf.XNNPACKActive() {
 		// Not fatal, but it changes the CPU numbers below by ~1.5x, so it must
 		// not go unnoticed in a log someone reads later.

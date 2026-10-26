@@ -5,6 +5,22 @@ configuration:
     description: >-
       Network address the controller listens on. Leave this as 0.0.0.0
       to listen on all container interfaces.
+  server_port:
+    name: Device port
+    description: >-
+      The port Echo devices connect to for the control, audio and shell
+      connections. Changing it moves the port every device dials; the new
+      port is advertised over mDNS, so devices pick it up when they
+      reconnect. Change this only if something else on this host already
+      uses port 8767.
+  server_tls_port:
+    name: Encrypted device port
+    description: >-
+      The wss (TLS) port used by devices that hold pushed credentials,
+      advertised to them over the network. Change it only if another service
+      on this host already uses it — the port is meant to move, and switching
+      the listener off is not a way back: a device holding a certificate will
+      not reconnect until it is re-paired by hand.
   server_ip:
     name: Controller LAN IP address
     description: >-
@@ -78,3 +94,13 @@ configuration:
       in Home Assistant's ssl folder and enter /ssl/<filename> here.
       Without it, fetching the spoken response fails certificate
       verification and turns end with no audio.
+  tts_wait_timeout:
+    name: Reply wait (seconds)
+    description: >-
+      How long the controller waits for Home Assistant to start answering
+      before it gives up on the turn, in seconds. Raise it if your
+      conversation agent uses tools: such an agent legitimately needs longer
+      than 30 seconds for a real question, and a turn that is given up is
+      silent — no audio and no error, which looks like a deaf Echo. Above
+      120 is not accepted, because the ring stops showing that the Echo is
+      working at 135 seconds.

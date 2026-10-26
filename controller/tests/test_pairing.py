@@ -6,6 +6,7 @@ em_pairing is pure; the wiring in em_api and em_controller is checked by ast,
 since the suite imports neither.
 """
 
+import _sources
 import ast
 from pathlib import Path
 
@@ -98,42 +99,42 @@ def test_issuing_rotates_the_token_and_stores_it_only_once_delivered():
     # The push rides the shell plane, which the device dials with its CURRENT
     # token. Storing the new one first refused the push on every device
     # connected over wss (15LE, 2026-09-26).
-    fn = _fn(_tree("em_api.py"), "_issue_credentials")
+    _, fn = _sources.find_def("issue_credentials")
     assert _calls(fn, "token_urlsafe"), "a fresh token, never the stored one"
     assert not [c for c in _calls(fn, "run_in_executor")
                 if "ensure_device_token" in _names_in_call(c)]
     stores = [c for c in _calls(fn, "run_in_executor")
               if "set_device_token" in _names_in_call(c)]
-    pushes = _calls(fn, "_stream_file_to_device")
+    pushes = _calls(fn, "stream_file")
     assert stores and pushes
     assert min(c.lineno for c in stores) > max(c.lineno for c in pushes)
     assert _calls(fn, "done")
 
 
 def test_credentials_are_issued_only_behind_an_approval():
-    # _issue_credentials writes the token to whoever holds the connection, so
+    # issue_credentials writes the token to whoever holds the connection, so
     # every caller must be one that an admin approval gates.
     callers = set()
-    for mod in ("em_api.py", "em_controller.py"):
-        tree = _tree(mod)
+    for path in _sources.MODULES:
+        tree = _sources.tree(path)
         for fn in ast.walk(tree):
-            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "_issue_credentials":
-                if _calls(fn, "_issue_credentials"):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name != "issue_credentials":
+                if _calls(fn, "issue_credentials"):
                     callers.add(fn.name)
     assert callers == {"handle_control", "_post_pair"}
     hc = _fn(_tree("em_controller.py"), "handle_control")
-    issue = _calls(hc, "_issue_credentials")[0]
+    issue = _calls(hc, "issue_credentials")[0]
     gated = [n for n in ast.walk(hc) if isinstance(n, ast.If)
              and _calls(n.test, "approved") and any(issue is x for x in ast.walk(n))]
     assert gated, "handle_control must issue credentials only under em_pairing.approved"
 
 
 def test_approving_a_device_opens_the_window():
-    assert _calls(_fn(_tree("em_api.py"), "_post_approve"), "approve")
+    assert _calls(_sources.find_def("_post_approve")[1], "approve")
 
 
 def test_secure_link_is_gone():
-    src = (CONTROLLER / "em_api.py").read_text()
+    src = _sources.all_code()
     assert "/secure_link" not in src and "_post_secure_link" not in src
     assert "secure_link" not in (CONTROLLER / "static" / "dashboard.jsx").read_text()
 

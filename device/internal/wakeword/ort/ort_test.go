@@ -34,10 +34,14 @@ func models(t *testing.T) (lib string, m ort.Models) {
 	if lib == "" || dir == "" || cls == "" {
 		t.Skip("set EM_ORT_LIB, EM_OWW_MODELS and EM_OWW_CLASSIFIER to run the ONNX Runtime tests")
 	}
+	// EM_OWW_STREAM is the streaming embedding model, made from the stock
+	// one by controller/tools/oww_stream.py. Without it the streaming tests
+	// skip and the rest run on the stock model.
 	return lib, ort.Models{
-		Melspec:    filepath.Join(dir, "melspectrogram.onnx"),
-		Embedding:  filepath.Join(dir, "embedding_model.onnx"),
-		Classifier: cls,
+		Melspec:         filepath.Join(dir, "melspectrogram.onnx"),
+		Embedding:       filepath.Join(dir, "embedding_model.onnx"),
+		Classifier:      cls,
+		EmbeddingStream: os.Getenv("EM_OWW_STREAM"),
 	}
 }
 
@@ -63,7 +67,19 @@ func newInferer(t *testing.T) *ort.Inferer {
 		t.Fatalf("NewInferer: %v", err)
 	}
 	t.Cleanup(func() { inf.Close() })
-	t.Logf("xnnpack active: %v", inf.XNNPACKActive())
+	t.Logf("xnnpack active: %v, streaming embedding: %s", inf.XNNPACKActive(), inf.StreamStatus())
+	return inf
+}
+
+func newStreamingInferer(t *testing.T) *ort.Inferer {
+	t.Helper()
+	inf := newInferer(t)
+	if os.Getenv("EM_OWW_STREAM") == "" {
+		t.Skip("set EM_OWW_STREAM to run the streaming embedding tests")
+	}
+	if !inf.Streaming() {
+		t.Fatalf("streaming embedding model did not come up: %s", inf.StreamStatus())
+	}
 	return inf
 }
 
@@ -77,7 +93,22 @@ func newInferer(t *testing.T) *ort.Inferer {
 // misconfigured session, and hand-fed models cannot catch a misaligned window.
 func TestInfererMatchesPython(t *testing.T) {
 	fx := loadFixture(t)
-	rep := fixture.Verify(newInferer(t), fx)
+	checkAgainstPython(t, fx, fixture.Verify(fixture.StockOnly(newInferer(t)), fx), false)
+}
+
+// TestStreamingInfererMatchesPython is the same claim for the streaming
+// embedding (#893): same audio, same fixture, same tolerances. It is held to
+// Python and not to the stock model, so the two cannot drift together.
+func TestStreamingInfererMatchesPython(t *testing.T) {
+	fx := loadFixture(t)
+	checkAgainstPython(t, fx, fixture.Verify(newStreamingInferer(t), fx), true)
+}
+
+func checkAgainstPython(t *testing.T, fx *fixture.ORT, rep fixture.Report, streaming bool) {
+	t.Helper()
+	if rep.Streaming != streaming {
+		t.Fatalf("embeddings came from the streaming model: %v, want %v", rep.Streaming, streaming)
+	}
 
 	if rep.Err != nil {
 		t.Fatalf("verify: %v", rep.Err)
@@ -207,5 +238,99 @@ func TestThreadsMustBePositive(t *testing.T) {
 	o.Threads = 0
 	if _, err := rt.NewInferer(m, o); err == nil {
 		t.Error("NewInferer accepted Threads=0")
+	}
+}
+
+// TestStreamStepsEqualStockWindows compares the two embedding models directly,
+// over more audio than the fixture holds and with a reset in the middle.
+func TestStreamStepsEqualStockWindows(t *testing.T) {
+	inf := newStreamingInferer(t)
+	const step, win = wakeword.MelStep * wakeword.MelBins, wakeword.MelWindow * wakeword.MelBins
+	mel := make([]float32, 200*step)
+	seed := uint64(7)
+	for i := range mel {
+		seed = seed*6364136223846793005 + 1442695040888963407
+		mel[i] = float32((seed>>33)%2000000)/1000000*8 - 8
+	}
+	for _, from := range []int{0, 37} { // two starts: the state must not survive a reset
+		inf.ResetStream()
+		for j := from; j < 200; j++ {
+			got, err := inf.EmbedStep(mel[j*step : (j+1)*step])
+			if err != nil {
+				t.Fatalf("step %d: %v", j, err)
+			}
+			end := (j + 1) * step
+			if end-win < from*step {
+				continue // the window reaches back before this start
+			}
+			got = append([]float32(nil), got...)
+			want, err := inf.Embed(mel[end-win : end])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := fixture.Compare(got, want); !d.Ok() {
+				t.Fatalf("start %d step %d: %d values differ, worst %.3g: %v", from, j, d.N, d.Worst, d.Examples)
+			}
+		}
+	}
+}
+
+// TestAStreamModelThatIsNotOneIsRefused: any ONNX file can be put at the
+// streaming model's path. The stock embedding model is the likeliest wrong
+// file, and it must leave the Inferer working on the stock path.
+func TestAStreamModelThatIsNotOneIsRefused(t *testing.T) {
+	lib, m := models(t)
+	rt, err := ort.Open(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wrong := range []string{m.Embedding, m.Classifier, filepath.Join(t.TempDir(), "absent.onnx")} {
+		m.EmbeddingStream = wrong
+		inf, err := rt.NewInferer(m, ort.DefaultOptions())
+		if err != nil {
+			t.Fatalf("a bad streaming model failed the Inferer: %v", err)
+		}
+		if inf.Streaming() {
+			t.Errorf("%s was accepted as a streaming model", filepath.Base(wrong))
+		}
+		if st := inf.StreamStatus(); st == "" || st == "on" {
+			t.Errorf("%s: status %q does not say why", filepath.Base(wrong), st)
+		}
+		if _, err := inf.EmbedStep(make([]float32, wakeword.MelStep*wakeword.MelBins)); err == nil {
+			t.Errorf("EmbedStep worked with no streaming model")
+		}
+		inf.Close()
+	}
+}
+
+// TestAWrongStreamModelFailsTheSelfCheck: a streaming model built from some
+// other embedding model has the right inputs and runs. Only comparing it with
+// the stock model can tell, which is what the self-check at load is for.
+// EM_OWW_STREAM_WRONG is one made with `oww_stream.py --perturb`.
+func TestAWrongStreamModelFailsTheSelfCheck(t *testing.T) {
+	lib, m := models(t)
+	wrong := os.Getenv("EM_OWW_STREAM_WRONG")
+	if wrong == "" {
+		t.Skip("set EM_OWW_STREAM_WRONG to a perturbed streaming model")
+	}
+	rt, err := ort.Open(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.EmbeddingStream = wrong
+	inf, err := rt.NewInferer(m, ort.DefaultOptions())
+	if err != nil {
+		t.Fatalf("a wrong streaming model failed the Inferer: %v", err)
+	}
+	defer inf.Close()
+	if inf.Streaming() {
+		t.Fatal("a streaming model that disagrees with the stock one was accepted")
+	}
+	if st := inf.StreamStatus(); !strings.HasPrefix(st, "self-check:") {
+		t.Fatalf("status %q, want the self-check's reason", st)
+	}
+	// And the stock path still reproduces Python.
+	if rep := fixture.Verify(inf, loadFixture(t)); !rep.Ok() || rep.Streaming {
+		t.Fatalf("stock path after a refused streaming model: ok=%v streaming=%v", rep.Ok(), rep.Streaming)
 	}
 }

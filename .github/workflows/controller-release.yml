@@ -50,12 +50,13 @@ permissions:
 
 jobs:
   build-and-push:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
       id-token: write       # provenance attestation (Sigstore OIDC)
       attestations: write
+      actions: read         # the main build's result for this commit
 
     steps:
       - name: Checkout
@@ -174,6 +175,24 @@ jobs:
           fi
           echo "found $src"
 
+      # The image existing is not the image passing. The main build pushes
+      # :sha-* first and runs the CPU baseline checks and the scan after, so
+      # an image that SIGILLs on kvm64 or a Pi is published all the same, and
+      # the step above would promote it. Only a successful run counts; a
+      # rerun that went green does.
+      - name: Check the main build passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(git rev-parse HEAD)"
+          n="$(gh api "repos/${{ github.repository }}/actions/workflows/controller-build.yml/runs?head_sha=$sha&status=success" --jq '.total_count')"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::'Controller Build (main)' has not passed for $sha."
+            echo "Fix main, or rerun the build if it failed for a transient reason, then rerun this release."
+            exit 1
+          fi
+          echo "main build passed for $sha"
+
       # NOT imagetools create, and not a rebuild either.
       #
       # imagetools would be the obvious promote — it writes a manifest
@@ -260,7 +279,7 @@ jobs:
       # without stopping the job — a release missing its SBOM is a gap in the
       # record, not a reason to report the release itself as broken.
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-controller-${{ steps.channel.outputs.version }}
           path: sbom-controller-${{ steps.channel.outputs.version }}.cdx.json

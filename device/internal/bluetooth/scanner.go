@@ -2,6 +2,7 @@ package bluetooth
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -9,11 +10,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/wilbowes/EchoMuse/pkg/board"
 )
 
-const (
-	devPath = "/dev/stpbt"
+// devPath is the Bluetooth controller's raw HCI device, which the board
+// states (pkg/board; biscuit: MediaTek's /dev/stpbt). "" when it has none.
+func devPath() string { return board.CurrentLayout().HCI }
 
+const (
 	cmdTimeout   = 3 * time.Second
 	retryBackoff = 5 * time.Second
 
@@ -49,6 +54,8 @@ type Stats struct {
 	YieldedMs   uint64 `json:"yieldedMs"`
 	Restarts    uint64 `json:"restarts"`
 	BdAddr      string `json:"bdAddr,omitempty"`
+	// Music is the burst duty's account (MusicDuty), once one is attached.
+	Music *DutyStats `json:"music,omitempty"`
 }
 
 // BatchCallback receives batched advertisements for upstream delivery.
@@ -66,6 +73,8 @@ type Scanner struct {
 	enabled bool
 	stopCh  chan struct{} // closes to stop the current run loop
 	doneCh  chan struct{} // closed by the run loop on exit
+	// noDeviceOnce logs, once, that the board has no HCI device to open.
+	noDeviceOnce sync.Once
 
 	// batch buffer — coalesced per (address+payload) so repeat broadcasts of
 	// identical data collapse to one advert carrying the latest RSSI.
@@ -78,6 +87,7 @@ type Scanner struct {
 	hciErrors   atomic.Uint64
 	restarts    atomic.Uint64
 	scanning    atomic.Bool
+	duty        atomic.Pointer[MusicDuty]
 	yields      atomic.Uint64 // times the scan stopped for the link
 	yieldedMs   atomic.Uint64 // total time it spent stopped
 	bdAddrMu    sync.Mutex
@@ -93,16 +103,38 @@ type Scanner struct {
 	yieldWant atomic.Bool
 	yieldSig  chan struct{}
 
+	// conns holds the LE connections (#656). connHold is its request to
+	// pause the scan while one is being made; it shares yieldSig.
+	conns    *ConnManager
+	connHold atomic.Bool
+
 	bluedroidDisabled bool
 }
 
 func NewScanner(onBatch BatchCallback) *Scanner {
-	return &Scanner{
+	s := &Scanner{
 		onBatch:  onBatch,
 		unique:   make(map[string]time.Time),
 		pending:  make(map[string]Advert),
 		gate:     newEmitGate(),
 		yieldSig: make(chan struct{}, 1),
+	}
+	s.conns = newConnManager(func(hold bool) {
+		if s.connHold.Swap(hold) != hold {
+			s.poke()
+		}
+	})
+	return s
+}
+
+// Conns is the connection manager. Its links live inside the scan session,
+// so they exist only while the scanner is enabled.
+func (s *Scanner) Conns() *ConnManager { return s.conns }
+
+func (s *Scanner) poke() {
+	select {
+	case s.yieldSig <- struct{}{}:
+	default:
 	}
 }
 
@@ -124,11 +156,19 @@ func (s *Scanner) Yield(yield bool) {
 	if s.yieldWant.Swap(yield) == yield {
 		return
 	}
-	select {
-	case s.yieldSig <- struct{}{}:
-	default:
-	}
+	s.poke()
 }
+
+// Enabled reports whether the scanner is on: asked for, and the board has a
+// device to scan with.
+func (s *Scanner) Enabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled
+}
+
+// SetMusicDuty attaches the duty whose account Stats reports.
+func (s *Scanner) SetMusicDuty(d *MusicDuty) { s.duty.Store(d) }
 
 // batchKey coalesces identical broadcasts: same address AND same payload
 // collapse to one entry (latest RSSI wins). Distinct payloads from the same
@@ -147,6 +187,14 @@ func (s *Scanner) SetEnabled(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if enabled == s.enabled {
+		return
+	}
+	if enabled && devPath() == "" {
+		// Nothing to open, and a session that can never start would retry
+		// and log every few seconds for the life of the process.
+		s.noDeviceOnce.Do(func() {
+			log.Println("[ble] this board states no Bluetooth device — proxy not started")
+		})
 		return
 	}
 	s.enabled = enabled
@@ -178,6 +226,11 @@ func (s *Scanner) Stats() Stats {
 	s.bdAddrMu.Lock()
 	bdAddr := s.bdAddr
 	s.bdAddrMu.Unlock()
+	var music *DutyStats
+	if d := s.duty.Load(); d != nil {
+		st := d.Stats()
+		music = &st
+	}
 	return Stats{
 		Scanning:    s.scanning.Load(),
 		AdvertsSeen: s.advertsSeen.Load(),
@@ -188,6 +241,7 @@ func (s *Scanner) Stats() Stats {
 		YieldedMs:   s.yieldedMs.Load(),
 		Restarts:    s.restarts.Load(),
 		BdAddr:      bdAddr,
+		Music:       music,
 	}
 }
 
@@ -224,61 +278,29 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	s.ensureBluedroidDisabled()
 
 	// Opening triggers WMT BT function-on + firmware patch download.
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(devPath(), os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return fmt.Errorf("open %s: %w", devPath(), err)
 	}
 	defer f.Close()
+	return s.serve(f, stopCh)
+}
 
-	// events carries every parsed HCI event out of the read pump; activity
-	// feeds the watchdog. The pump exits when the fd closes.
-	events := make(chan []byte, 64)
-	readErr := make(chan error, 1)
-	go func() {
-		var parser h4Parser
-		buf := make([]byte, 2048)
-		for {
-			n, err := f.Read(buf)
-			if err != nil {
-				readErr <- err
-				return
-			}
-			for _, pkt := range parser.Feed(buf[:n]) {
-				select {
-				case events <- pkt:
-				default: // never block the pump; drop under backlog
-				}
-			}
-		}
-	}()
-
-	sendCmd := func(opcode uint16, params []byte) (commandComplete, error) {
-		if _, err := f.Write(buildCommand(opcode, params)); err != nil {
-			return commandComplete{}, fmt.Errorf("write cmd %04x: %w", opcode, err)
-		}
-		deadline := time.After(cmdTimeout)
-		for {
-			select {
-			case pkt := <-events:
-				if cc, ok := parseCommandComplete(pkt); ok && cc.opcode == opcode {
-					if cc.status != 0 {
-						return cc, fmt.Errorf("cmd %04x status 0x%02x", opcode, cc.status)
-					}
-					return cc, nil
-				}
-			case err := <-readErr:
-				return commandComplete{}, fmt.Errorf("read during cmd %04x: %w", opcode, err)
-			case <-deadline:
-				return commandComplete{}, fmt.Errorf("cmd %04x timeout", opcode)
-			case <-stopCh:
-				return commandComplete{}, fmt.Errorf("stopped")
-			}
-		}
-	}
+// serve runs a session on an open transport. Split from session so the whole
+// lifecycle can be driven against a simulated controller.
+func (s *Scanner) serve(rw io.ReadWriteCloser, stopCh chan struct{}) error {
+	// The host owns the read pump: command answers come back through Cmd,
+	// advertising reports on host.adv, and everything a connection needs on
+	// host.link, which the connection manager reads. The pump exits when the
+	// transport closes.
+	host := newHCIHost(rw)
+	sendCmd := host.Cmd
 
 	if _, err := sendCmd(opReset, nil); err != nil {
 		return err
 	}
+	s.conns.attach(host)
+	defer s.conns.detach()
 	if cc, err := sendCmd(opReadBdAddr, nil); err == nil {
 		s.bdAddrMu.Lock()
 		s.bdAddr = formatBdAddr(cc.params)
@@ -320,7 +342,8 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	}
 	// A session that starts while the link is busy (the watchdog re-init,
 	// or the proxy being enabled mid-turn) holds the scan until it is not.
-	if !s.yieldWant.Load() {
+	wantScan := func() bool { return !s.yieldWant.Load() && !s.connHold.Load() }
+	if wantScan() {
 		if err := setScan(true); err != nil {
 			return err
 		}
@@ -356,7 +379,7 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 	for {
 		select {
 		case <-s.yieldSig:
-			if want := !s.yieldWant.Load(); want != scanOn {
+			if want := wantScan(); want != scanOn {
 				if err := setScan(want); err != nil {
 					return err
 				}
@@ -365,11 +388,14 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 					watchdog.Reset(watchdogQuiet)
 				}
 			}
-		case pkt := <-events:
+		case <-host.active:
+			// Any packet at all says the chip is alive, a link's as much as
+			// an advert: re-initialising would drop every connection.
 			if scanOn {
 				disarm()
 				watchdog.Reset(watchdogQuiet)
 			}
+		case pkt := <-host.adv:
 			if adverts := parseAdvReports(pkt); len(adverts) > 0 {
 				if s.ingest(adverts) {
 					// Keep the total flush rate at or below the plain tick.
@@ -382,11 +408,13 @@ func (s *Scanner) session(stopCh chan struct{}) error {
 			s.gate.prune(time.Now())
 		case <-watchdog.C:
 			return fmt.Errorf("watchdog: no HCI events for %s — re-initialising", watchdogQuiet)
-		case err := <-readErr:
-			return fmt.Errorf("read: %w", err)
+		case <-host.dead:
+			return fmt.Errorf("read: %w", host.err)
 		case <-stopCh:
-			// Best-effort orderly shutdown: stop the scan so the chip idles.
-			_, _ = f.Write(buildCommand(opLESetScanEnable, []byte{0x00, 0x00}))
+			// Best-effort orderly shutdown: reset, which stops the scan and
+			// drops any link, so the chip idles and no peer is left holding
+			// a connection to a closed device.
+			_ = host.write(buildCommand(opReset, nil))
 			time.Sleep(100 * time.Millisecond)
 			return nil
 		}

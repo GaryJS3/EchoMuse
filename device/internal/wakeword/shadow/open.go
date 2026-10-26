@@ -79,6 +79,12 @@ func Open(owwModel string, threshold float32, onCross func(score, threshold floa
 		}
 	}
 
+	// The streaming embedding is optional (#893): without the file, or with
+	// one that fails its self-check, the stock model scores as before.
+	if p := filepath.Join(dir, EmbeddingStreamFile); fileExists(p) {
+		models.EmbeddingStream = p
+	}
+
 	lib := filepath.Join(dir, "libonnxruntime.so")
 	rt, err := ort.Open(lib)
 	if err != nil {
@@ -91,7 +97,30 @@ func Open(owwModel string, threshold float32, onCross func(score, threshold floa
 
 	s := NewScorer(inf, threshold, onCross)
 	s.closer = inf
-	s.info = fmt.Sprintf("onnxruntime %s, model %s, xnnpack=%v",
-		rt.Version(), stem, inf.XNNPACKActive())
+	s.info = fmt.Sprintf("onnxruntime %s, model %s, xnnpack=%v, streaming embedding: %s",
+		rt.Version(), stem, inf.XNNPACKActive(), inf.StreamStatus())
 	return s, nil
+}
+
+// EmbeddingStreamFile is the streaming embedding model's name in Dir(). It
+// must match em_oww_assets.STREAM_EMBEDDING on the controller, which installs
+// it.
+const EmbeddingStreamFile = "embedding_stream.onnx"
+
+// StreamFileSig identifies the streaming model file as it is now: empty when
+// absent, otherwise its size and modification time. The caller rebuilds the
+// scorer when this changes, which is how a model installed while the device
+// is running comes into use without a restart. A file that fails its
+// self-check keeps its signature, so it is tried once and not on every push.
+func StreamFileSig() string {
+	st, err := os.Stat(filepath.Join(Dir(), EmbeddingStreamFile))
+	if err != nil || st.IsDir() {
+		return ""
+	}
+	return fmt.Sprintf("%d@%d", st.Size(), st.ModTime().UnixNano())
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }

@@ -387,7 +387,8 @@ def test_external_unavailable_never_dispatches_to_ha(monkeypatch):
 
 
 def _api_function(name, namespace):
-    tree = ast.parse((ROOT / "em_api.py").read_text(encoding="utf-8"))
+    module = "em_routes_system.py" if name in ("_get_system_config", "_patch_system_config") else "em_api.py"
+    tree = ast.parse((ROOT / module).read_text(encoding="utf-8"))
     fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
     fn.decorator_list = []
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "em_api.py", "exec"), namespace)
@@ -472,7 +473,7 @@ def test_system_config_defaults_validation_and_persistence():
                      _error=lambda code, message, status: {"error": code, "status": status})
     async def body(request):
         return request
-    namespace["_json_body"] = body
+    namespace["em_http"] = SimpleNamespace(ok=namespace["_ok"], error=namespace["_error"], json_body=body)
     get = _api_function("_get_system_config", namespace)
     patch = _api_function("_patch_system_config", namespace)
 
@@ -640,11 +641,14 @@ def test_existing_controller_lifecycle_restores_state_and_music(monkeypatch, sta
                      em_player=SimpleNamespace(interrupt=interrupt, resume_interrupted=resume),
                      leds_listening=noop, _push_device_state=noop, _leds_turn_end=noop,
                      leds_spin_green=spin, _run_streaming_post_turn_playback=stream,
-                     _wake_arbiter=SimpleNamespace(release=lambda d: released.append(d)))
+                     em_listen=__import__("em_listen"),
+                     em_state=SimpleNamespace(wake_arbiter=SimpleNamespace(release=lambda d: released.append(d))))
     source = (ROOT / "em_controller.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_run_voice_locked")
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "em_controller.py", "exec"), namespace)
+    decision = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_await_barge_decision")
+    namespace["BARGE_DECISION_TIMEOUT_S"] = 1
+    exec(compile(ast.Module(body=[decision, fn], type_ignores=[]), "em_controller.py", "exec"), namespace)
 
     async def main():
         task = asyncio.create_task(namespace["_run_voice_locked"](device))

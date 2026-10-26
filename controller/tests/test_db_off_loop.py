@@ -1,7 +1,9 @@
 """
 Database work stays off the event loop, and queued writes keep their order.
 
-em_controller made 21 synchronous writes and a read from coroutines. Each
+em_controller made 21 synchronous writes and a read from coroutines, and
+em_api and em_auth 34 more (release polling, system status, login), found
+when this guard was widened from em_controller to every module. Each
 held the loop for the write plus any wait on em_db's lock, which executor
 threads share: measured 2026-09-26 on the dev box with a 20,000-turn activity
 read holding the lock, loop lateness reached 114ms p99 / 122ms max with the
@@ -19,6 +21,7 @@ import threading
 import time
 from pathlib import Path
 
+import _sources
 import em_dbwriter
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -50,9 +53,14 @@ def _sync_db_calls_in_coroutines(path: Path, allow=()) -> list[str]:
     return found
 
 
-def test_em_controller_coroutines_make_no_synchronous_db_calls():
+# em_db is the database; em_dbwriter is the thread that calls it.
+NOT_ON_LOOP = {"em_db.py", "em_dbwriter.py"}
+
+
+def test_coroutines_make_no_synchronous_db_calls():
     # db.init runs once in main() before anything else is scheduled.
-    found = _sync_db_calls_in_coroutines(CONTROLLER / "em_controller.py", allow={"init"})
+    found = [x for m in _sources.MODULES if m.name not in NOT_ON_LOOP
+             for x in _sync_db_calls_in_coroutines(m, allow={"init"})]
     assert not found, (
         "synchronous database calls on the event loop:\n  " + "\n  ".join(found)
         + "\nQueue writes nothing reads back with em_dbwriter.submit; await "
@@ -71,10 +79,8 @@ def test_the_guard_sees_a_synchronous_call(tmp_path):
     assert _sync_db_calls_in_coroutines(p) == ["m.py:2 db.log_device in f"]
 
 
-def test_push_log_event_queues_its_write():
-    tree = ast.parse((CONTROLLER / "em_api.py").read_text())
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_push_log_event")
+def test_push_log_queues_its_write():
+    _, fn = _sources.find_def("push_log")
     submits = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
                and getattr(n.func, "attr", None) == "submit"
                and getattr(n.func.value, "id", None) == "em_dbwriter"]

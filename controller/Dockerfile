@@ -10,7 +10,7 @@
 # add-on build on a kvm64 host died here ("NumPy was built with baseline
 # optimizations: (X86_V2)"), while CI's v2-capable runners never saw it. The
 # output hash is unchanged with 2.3.5 (checked on linux/amd64).
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS silero
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS silero
 COPY tools/silero_typed.py /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
     python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx', '/tmp/in.onnx')" && \
@@ -18,9 +18,24 @@ RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3
     python /tmp/silero_typed.py /tmp/in.onnx /silero_vad.onnx && \
     echo "da5e8a9c9c07981b907e8affe5497fe604958c51b67bff07231778d701d164d0  /silero_vad.onnx" | sha256sum -c -
 
+# openWakeWord's embedding model rewritten to take only the 8 mel frames that
+# are new per call (tools/oww_stream.py, #893): identical embeddings for about
+# a third of the CPU on an Echo. Same shape as the stage above: `onnx` stays
+# out of the controller image, and input and output are pinned by sha256. The
+# input is the file the openwakeword package ships, and the final stage checks
+# the package's copy against the same hash, so the two models a device is
+# given cannot come from different embedding models without the build failing.
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1 AS oww_stream
+COPY tools/oww_stream.py /tmp/
+RUN pip install --no-cache-dir --root-user-action=ignore onnx==1.20.1 numpy==2.3.5 && \
+    python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx', '/tmp/in.onnx')" && \
+    echo "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f  /tmp/in.onnx" | sha256sum -c - && \
+    python /tmp/oww_stream.py /tmp/in.onnx /embedding_stream.onnx && \
+    echo "7a867551d8e96935336ad38a83b24f443c0ac133e3c7a770bc584b394a5725b1  /embedding_stream.onnx" | sha256sum -c -
+
 # Base pinned by the multi-arch index digest, so every build of a given commit
 # starts from the same bytes; Dependabot moves the digest weekly with the tag.
-FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
+FROM python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
@@ -43,8 +58,19 @@ WORKDIR /app
 # apt install below and the floating base tag; it adds no new class of
 # nondeterminism.
 #
+# APT_SNAPSHOT is what makes the upgrade actually run in CI. Both workflows
+# build with the GHA layer cache, and this layer's key is the base digest plus
+# the text of the RUN line — neither changes week to week, so the layer was
+# served from cache and apt never ran: main's build of 2026-10-05 still had
+# openssl and pcre2 at versions Debian had already replaced, and the weekly
+# scan failed on them. The workflows pass the ISO week (2026-W41), so the
+# layer is rebuilt once a week and cached in between. It is echoed because an
+# ARG only reaches a RUN's cache key when the RUN uses it. A local or add-on
+# build passes nothing and behaves as before.
+#
 # curl is for vendoring JS dependencies.
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
+ARG APT_SNAPSHOT=unset
+RUN echo "apt snapshot: ${APT_SNAPSHOT}" && apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -98,6 +124,7 @@ ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 COPY em_controller.py .
 COPY em_api.py .
 COPY em_db.py .
+COPY em_boards.py .
 COPY em_auth.py .
 COPY em_eq.py .
 COPY em_limiter.py .
@@ -115,6 +142,22 @@ COPY em_wav.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
+COPY em_routes_activity.py .
+COPY em_routes_auth.py .
+COPY em_routes_config.py .
+COPY em_routes_devices.py .
+COPY em_routes_events.py .
+COPY em_routes_link.py .
+COPY em_routes_oww.py .
+COPY em_routes_provision.py .
+COPY em_routes_shell.py .
+COPY em_routes_static.py .
+COPY em_routes_system.py .
+COPY em_routes_updates.py .
+COPY em_process_stats.py .
+COPY em_device_view.py .
+COPY em_device_config.py .
+COPY em_credentials.py .
 COPY em_linkauth.py .
 COPY em_tcp.py .
 COPY em_pacing.py .
@@ -129,19 +172,32 @@ COPY em_ble_health.py .
 COPY em_config_types.py .
 COPY em_dbwriter.py .
 COPY em_tasks.py .
+COPY em_ble_gatt.py .
 COPY em_ble_proxy.py .
 COPY em_broadcast.py .
 COPY em_oww_assets.py  ./
+COPY em_oww_check.py   ./
 COPY em_oww_models.py .
 COPY em_pairing.py .
 COPY em_oww_metadata.py .
 COPY em_oww_warmup.py .
 COPY em_arbiter.py .
+COPY em_state.py .
+COPY em_http.py .
+COPY em_events.py .
+COPY em_shell.py .
+COPY em_releases.py .
+COPY em_payloads.py .
+COPY em_ota.py .
+COPY em_oww_sync.py .
+COPY em_emos_ota.py .
+COPY em_reconcile.py .
 COPY em_listen.py .
 COPY em_wakelevel.py .
 COPY em_endpoints.py .
 COPY em_health.py .
 COPY em_button.py .
+COPY em_wakeword.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
@@ -194,14 +250,26 @@ RUN mkdir -p /app/models/oww_runtime && \
     python -c "import zipfile, shutil; z = zipfile.ZipFile('/tmp/ort.aar'); shutil.copyfileobj(z.open('jni/armeabi-v7a/libonnxruntime.so'), open('/app/models/oww_runtime/libonnxruntime.so', 'wb'))" && \
     rm /tmp/ort.aar
 COPY --from=silero /silero_vad.onnx /app/models/oww_runtime/silero_vad.onnx
+# The streaming embedding model, and a check that the stock model beside it in
+# the openwakeword package is the one it was made from. A device verifies the
+# pair itself and falls back to the stock model if they disagree, so a
+# mismatch would cost every Echo the saving with nothing failing: fail here.
+COPY --from=oww_stream /embedding_stream.onnx /app/models/oww_runtime/embedding_stream.onnx
+RUN echo "70d164290c1d095d1d4ee149bc5e00543250a7316b59f31d056cff7bd3075c1f  $(python3 -c 'import openwakeword, os; print(os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models", "embedding_model.onnx"))')" | sha256sum -c -
 # Dashboard SPA — placeholder is index.html, full dashboard is dashboard.html
 COPY static/ ./static/
 # Compile JSX dashboard with esbuild
 RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x64 ;; arm64) EPKG=linux-arm64 ;; *) echo "unsupported arch: $EARCH" >&2; exit 1 ;; esac && curl -sfL -o /tmp/esbuild.tar.gz "https://registry.npmjs.org/@esbuild/${EPKG}/-/${EPKG}-0.20.2.tgz" &&     tar -xz -C /tmp -f /tmp/esbuild.tar.gz &&     install -m755 /tmp/package/bin/esbuild /usr/local/bin/esbuild &&     esbuild /app/static/dashboard.jsx       --bundle=false       --jsx=transform       --jsx-factory=React.createElement       --jsx-fragment=React.Fragment       --outfile=/app/static/dashboard.js &&     rm -rf /tmp/esbuild.tar.gz /tmp/package /usr/local/bin/esbuild
-# Database persisted via volume mount
-# docker run -v ~/EchoMuse/controller/data:/app/data ...
-# Set DB_PATH=/app/data/echomuse.db in environment
+# The database, the device-link certificates and the recordings all sit beside
+# DB_PATH, so it defaults to the directory the compose files mount (#629).
+# The code's own default is the relative "echomuse.db", which in this image is
+# /app: with no .env everything was written inside the container and lost on
+# every recreate, certificates included, so every Echo needed pairing again.
+# The add-on sets its own DB_PATH (/data), which overrides this.
+ENV DB_PATH=/app/data/echomuse.db
+RUN mkdir -p /app/data
 COPY em_cacerts.py .
+COPY em_chunked.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
 # the env vars em_controller.py already reads, then execs into it — a no-op

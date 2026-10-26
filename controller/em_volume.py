@@ -45,3 +45,24 @@ def ha_volume_to_device(volume: float) -> int:
     put the DAC into positive digital gain.
     """
     return max(0, min(DEVICE_VOLUME_MAX, round(float(volume) * DEVICE_VOLUME_MAX)))
+
+
+# ─── The stock-sound profile's volume law (#229) ──────────────────────────────
+#
+# The plain law (0.5dB per level) lifted by STOCK_CEILING_DB, so full volume
+# drives the chain's compressors and limiter. Stock FireOS's own table was
+# tried first and dropped: it is front-loaded (most of its range is gone by
+# 55%), and its +14.5dB above 70% bought little loudness, measured through
+# our chain: past about +10dB, music gains under 0.5dB per dB of input and
+# the rest is compression. Keeping 0.5dB per level also keeps every physical
+# button press at 4dB and leaves HA, Music Assistant and stored startupVolume
+# values meaning what they always have. The ceiling was picked by ear.
+STOCK_CEILING_DB = 10.0
+
+
+def stock_level_db(level: int) -> float | None:
+    """Gain in dB for a device level under the stock-sound profile, or None
+    for silence (level 0)."""
+    if level <= 0:
+        return None
+    return level_to_db(min(level, DEVICE_VOLUME_MAX)) + STOCK_CEILING_DB

@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/wilbowes/EchoMuse/internal/atomicfile"
 )
 
 // statePath persists mute state across reboots and OTA restarts. It lives
@@ -37,9 +39,9 @@ func loadDeviceState(path string) (st deviceState, ok bool) {
 	return st, true
 }
 
-// saveDeviceState writes the state atomically (write-then-rename, so a power
-// cut mid-write can't leave a truncated file). Called on every mute toggle —
-// rare enough that a synchronous flash write needs no debounce.
+// saveDeviceState writes the state so a power cut cannot empty it (see
+// atomicfile.Write). Called on every mute toggle — rare enough that a
+// synchronous flash write needs no debounce.
 func saveDeviceState(path string, st deviceState) {
 	data, err := json.Marshal(st)
 	if err != nil {
@@ -50,12 +52,7 @@ func saveDeviceState(path string, st deviceState) {
 		log.Printf("[state] mkdir failed: %v", err)
 		return
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	if err := atomicfile.Write(path, data, 0o644); err != nil {
 		log.Printf("[state] write failed: %v", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		log.Printf("[state] rename failed: %v", err)
 	}
 }

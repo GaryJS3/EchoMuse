@@ -2,6 +2,7 @@
 import re
 from pathlib import Path
 
+import _sources
 import em_labels
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -36,10 +37,8 @@ def test_the_dashboard_mirrors_the_cap():
 
 
 def test_both_label_endpoints_enforce_it():
-    api = (CONTROLLER / "em_api.py").read_text()
-    for handler in ("async def _patch_device", "async def _post_approve"):
-        body = api[api.index(handler):]
-        body = body[:body.index("\n@", 1)]
+    for handler in ("_patch_device", "_post_approve"):
+        body = _sources.def_source(handler)
         assert "_require_label(body)" in body, f"{handler} must use _require_label"
 
 
@@ -140,8 +139,6 @@ def test_a_pending_echo_with_no_label_duplicates_nothing():
 
 
 def test_both_label_endpoints_refuse_duplicates():
-    api = (CONTROLLER / "em_api.py").read_text()
-    for handler in ("async def _patch_device", "async def _post_approve"):
-        body = api[api.index(handler):]
-        body = body[:body.index("\n@", 1)]
+    for handler in ("_patch_device", "_post_approve"):
+        body = _sources.def_source(handler)
         assert "await _require_unique_label(label, device_id)" in body, handler

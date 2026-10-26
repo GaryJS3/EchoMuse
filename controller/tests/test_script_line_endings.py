@@ -22,24 +22,29 @@ def test_device_sync_sends_unix_script_and_verifies_its_digest(tmp_path, functio
     expected = b"#!/system/bin/sh\necho ready\n"
     (tmp_path / payload).write_bytes(expected.replace(b"\n", newline))
     # Exercise the real sync function without starting a controller or device.
-    tree = ast.parse((ROOT / "controller/em_api.py").read_text())
-    node = next(n for n in tree.body if getattr(n, "name", None) == function)
+    payload_module, function_name = {
+        "_sync_start_script": ("em_payloads.py", "sync_start_script"),
+        "_sync_debloat": ("em_payloads.py", "sync_debloat"),
+    }[function]
+    tree = ast.parse((ROOT / "controller" / payload_module).read_text(encoding="utf-8"))
+    node = next(n for n in tree.body if getattr(n, "name", None) == function_name)
     shell = AsyncMock(side_effect=["SHELL_OK", "SCRIPT_SYNCED DEBLOAT_SYNCED"])
     transfer = AsyncMock(return_value="TRANSFER_OK")
     scope = {
         "PAYLOADS_DIR": tmp_path,
         "_SHELL_OK": "SHELL_OK",
+        "OK_MARK": "SHELL_OK",
         "DEBLOAT_SCRIPT_PATH": "/service.d/echomuse-debloat.sh",
-        "_shell_run": shell,
-        "_stream_file_to_device": transfer,
+        "em_shell": SimpleNamespace(run=shell, stream_file=transfer, OK_MARK="SHELL_OK"),
         "_push_log_event": AsyncMock(),
-        "_debloat_packages": lambda: [],
+        "em_events": SimpleNamespace(push_log=AsyncMock()),
+        "debloat_packages": lambda: [],
         "asyncio": SimpleNamespace(sleep=AsyncMock()),
         "hashlib": hashlib,
         "log": Mock(),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "em_api.py", "exec"), scope)
-    asyncio.run(scope[function](object(), "test-device"))
+    asyncio.run(scope[function_name](object(), "test-device"))
     transfer.assert_awaited_once()
     assert transfer.await_args.args[1] == expected
     # Integrity validation must use the transmitted bytes, not the disk bytes.

@@ -101,6 +101,30 @@ type Inferer interface {
 	Classify(feats []float32) (float32, error)
 }
 
+// StreamEmbedder is an Inferer that can also produce the embedding from the
+// MelStep frames that are new, holding the rest between calls (#893). The
+// stock model recomputes 68 of its 76 frames on every chunk; this one does
+// not, for the same output: the model's convolutions are unpadded in time and
+// its pooling's total stride is MelStep.
+//
+//	EmbedStep: in [MelStep*MelBins] -> out [FeatDim], for the MelWindow
+//	           frames ending with these, PROVIDED the nine steps before it
+//	           were the frames before these, in order. Anything else needs
+//	           ResetStream and those steps fed again.
+//
+// Streaming reports whether it is usable now. It may turn false at any time
+// (a failed load, a failed self-check), and the Detector then uses Embed.
+type StreamEmbedder interface {
+	Streaming() bool
+	EmbedStep(frames []float32) ([]float32, error)
+	ResetStream()
+}
+
+// streamPrime is how many steps must precede the one whose output is wanted:
+// MelWindow is nine and a half steps, so ten cover it and the half step
+// before the window cannot reach the output.
+const streamPrime = (MelWindow + MelStep - 1) / MelStep
+
 // Detector holds the streaming state for one audio source.
 //
 // Not safe for concurrent use: the device drives it from the single mic
@@ -112,9 +136,18 @@ type Detector struct {
 	remainder []int16 // samples not yet forming a whole ChunkSamples
 	accum     int     // samples buffered since the last melspec run
 
-	mel    []float32 // melFrames x MelBins, row-major
-	feat   []float32 // featFrames x FeatDim, row-major
+	mel     []float32 // melFrames x MelBins, row-major
+	feat    []float32 // featFrames x FeatDim, row-major
 	scratch []float32 // reused Embed input, avoids a per-chunk allocation
+
+	// Streaming embedding. melTotal counts every mel frame ever appended, so
+	// a position survives the ring being trimmed; streamAt is the frame the
+	// stream's state runs up to, or -1 when it has to be fed again from
+	// scratch.
+	stream   StreamEmbedder
+	melTotal int
+	streamAt int
+	step     []float32
 }
 
 // New returns a Detector with the mel ring pre-filled to MelWindow frames of
@@ -128,11 +161,16 @@ func New(inf Inferer) *Detector {
 	for i := range mel {
 		mel[i] = 1.0
 	}
-	return &Detector{
-		inf:     inf,
-		mel:     mel,
-		scratch: make([]float32, MelWindow*MelBins),
+	d := &Detector{
+		inf:      inf,
+		mel:      mel,
+		scratch:  make([]float32, MelWindow*MelBins),
+		melTotal: MelWindow,
+		streamAt: -1,
+		step:     make([]float32, MelStep*MelBins),
 	}
+	d.stream, _ = inf.(StreamEmbedder)
+	return d
 }
 
 // Ready reports whether enough real embeddings have accumulated for the
@@ -151,6 +189,17 @@ func (d *Detector) Reset() {
 	for i := range d.mel {
 		d.mel[i] = 1.0
 	}
+	d.melTotal = MelWindow
+	d.streamAt = -1
+}
+
+// LastEmbedding returns a copy of the newest embedding, or nil before the
+// first. For checks that compare the pipeline with a reference stage by stage.
+func (d *Detector) LastEmbedding() []float32 {
+	if len(d.feat) < FeatDim {
+		return nil
+	}
+	return append([]float32(nil), d.feat[len(d.feat)-FeatDim:]...)
 }
 
 // ErrNotReady is returned by Score before FeatWindow embeddings exist.
@@ -203,8 +252,7 @@ func (d *Detector) Push(samples []int16) (n int, err error) {
 			// Not enough history yet; upstream skips these too.
 			continue
 		}
-		copy(d.scratch, d.mel[start*MelBins:end*MelBins])
-		emb, err := d.inf.Embed(d.scratch)
+		emb, err := d.embed(start, end)
 		if err != nil {
 			return 0, fmt.Errorf("wakeword: embed: %w", err)
 		}
@@ -219,6 +267,62 @@ func (d *Detector) Push(samples []int16) (n int, err error) {
 	}
 	d.accum = 0
 	return n, nil
+}
+
+// embed returns the embedding of mel ring frames [start, end), MelWindow of
+// them. With a streaming model it feeds only the last MelStep, after making
+// sure the stream's state is the frames before them: on the first window,
+// after a Reset, and whenever the window has not moved by exactly MelStep
+// since the last one, the state is rebuilt from the ring. A stream that fails
+// is abandoned for the stock model on the same window, so a bad streaming
+// model costs CPU and never an embedding.
+func (d *Detector) embed(start, end int) ([]float32, error) {
+	if d.stream != nil && d.stream.Streaming() {
+		if emb, err := d.embedStream(end); err == nil {
+			return emb, nil
+		}
+		d.streamAt = -1
+	}
+	copy(d.scratch, d.mel[start*MelBins:end*MelBins])
+	return d.inf.Embed(d.scratch)
+}
+
+func (d *Detector) embedStream(end int) ([]float32, error) {
+	abs := d.melTotal - (len(d.mel)/MelBins - end)
+	if d.streamAt != abs-MelStep {
+		d.stream.ResetStream()
+		d.streamAt = -1
+		for k := streamPrime - 1; k >= 1; k-- {
+			if _, err := d.stream.EmbedStep(d.stepFrames(end - MelStep*k)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	emb, err := d.stream.EmbedStep(d.stepFrames(end))
+	if err != nil {
+		return nil, err
+	}
+	if len(emb) != FeatDim {
+		return nil, fmt.Errorf("wakeword: streaming embed returned %d values, want %d", len(emb), FeatDim)
+	}
+	d.streamAt = abs
+	return emb, nil
+}
+
+// stepFrames copies the MelStep ring frames ending at end. Frames before the
+// start of the ring read as zero: that only happens to the first half of the
+// first priming step, which lies outside the window being embedded.
+func (d *Detector) stepFrames(end int) []float32 {
+	for i := range d.step {
+		d.step[i] = 0
+	}
+	from := end - MelStep
+	skip := 0
+	if from < 0 {
+		skip, from = -from, 0
+	}
+	copy(d.step[skip*MelBins:], d.mel[from*MelBins:end*MelBins])
+	return d.step
 }
 
 // Score runs the classifier over the most recent FeatWindow embeddings.
@@ -277,6 +381,7 @@ func (d *Detector) melspec(nSamples int) error {
 	for _, v := range out {
 		d.mel = append(d.mel, v/melScale+melOffset)
 	}
+	d.melTotal += frames
 	if max := MelBufMax * MelBins; len(d.mel) > max {
 		d.mel = append(d.mel[:0], d.mel[len(d.mel)-max:]...)
 	}
