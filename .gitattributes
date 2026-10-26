@@ -3,3 +3,4 @@
 *.py text eol=lf
 *.mjs text eol=lf
 emos/device/em-wifi text eol=lf
+device/internal/discovery/testdata/controller_managed.json text eol=lf
