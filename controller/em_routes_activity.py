@@ -25,11 +25,18 @@ log = logging.getLogger("echomuse.api")
 def register(app: web.Application) -> None:
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
+    app.router.add_get("/api/devices/{id}/wake-observations", _get_wake_observations)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/wake-samples", _get_wake_samples)
     app.router.add_patch("/api/devices/{id}/wake-samples/{sample}", _patch_wake_sample)
     app.router.add_delete("/api/devices/{id}/wake-samples/{sample}", _delete_wake_sample)
     app.router.add_get("/api/devices/{id}/wake-samples/{sample}/audio", _get_wake_sample_audio)
+
+
+@auth.require_auth
+async def _get_wake_observations(request: web.Request) -> web.Response:
+    report = await asyncio.to_thread(db.wake_two_frame_report, request.match_info["id"])
+    return em_http.ok(report)
 
 
 @auth.require_auth

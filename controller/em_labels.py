@@ -1,4 +1,4 @@
-"""Device label rules, as a pure function the suite can import.
+r"""Device label rules, as a pure function the suite can import.
 
 A label becomes the dashboard name, HA's "<label> Voice Assistant", and a
 slug inside every entity_id HA builds for the device. Home Assistant itself

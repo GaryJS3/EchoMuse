@@ -27,6 +27,35 @@ The stored values are kept from the three-mode design (`off`/`shadow`/`on`) so
 existing configuration and firmware keep their meaning; only the presentation
 changed.
 
+### Two-frame wake trial on the controller (Assister fork)
+
+For an ordinary controller-scored wake, the first 80 ms frame over the
+effective threshold still starts the usual arbitration and voice flow.
+The observer uses the same warmed model to score the immediately following
+microphone frame against the same threshold. It taps the frame before routing,
+so the voice session receives its command audio normally. The trial stores
+timestamps, model names and scores. Existing wake-clip settings govern audio
+retention independently.
+
+Open a satellite's **Activity → Two-frame wake trial** to review seven days
+of retained observations. Expand **Recent wake candidates** for the latest
+100 timestamps and score pairs. **Would reject** means the following score
+fell below the original threshold. **Unmeasured** means the observer could
+not score a contiguous second frame. A candidate may subsequently lose
+arbitration to another Echo. Button presses, follow-ups, acknowledgement
+windows, private on-device wakes and playback interruptions take other paths.
+
+To evaluate the trial, match timestamps to known accidental activations
+during TV viewing and deliberate wakes from the usual speaking position.
+A rejection on a deliberate wake counts as a potential miss. A no-speech
+turn on its own cannot establish whether a wake was accidental.
+
+The authenticated report is available at
+`GET /api/devices/{id}/wake-observations`. It reads the controller's existing
+per-device SQLite log (10,000 entries). Look for `wake_two_frame` there or in
+the controller service log. Set `ECHOMUSE_WAKE_TWO_FRAME_MODE=observe` to
+enable the observer (fork default), or `off` to disable it on restart.
+
 ## What "On this Echo" means, exactly
 
 **No audio leaves the Echo until its own wake word detector fires.** Then it

@@ -1208,6 +1208,58 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
+function WakeObservationPanel({ deviceId }) {
+  const [report, setReport] = useState(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let active = true, timer;
+    async function load() {
+      try {
+        const result = await API.get(`/api/devices/${deviceId}/wake-observations`);
+        if (active) { setReport(result); setFailed(false); }
+      } catch {
+        if (active) setFailed(true);
+      } finally {
+        if (active) timer = setTimeout(load, 30000);
+      }
+    }
+    load();
+    return () => { active = false; clearTimeout(timer); };
+  }, [deviceId]);
+
+  const labels = { would_accept: 'Would accept', would_reject: 'Would reject', unavailable: 'Unmeasured' };
+  const score = value => Number.isFinite(value) ? value.toFixed(4) : '—';
+  return (
+    <Panel label="Two-frame wake trial">
+      {failed && <p role="status">Could not refresh observations. Retrying in 30 seconds.</p>}
+      {!report && !failed && <p>Loading observations…</p>}
+      {report && <>
+        <div style={{ display:'flex', flexWrap:'wrap', gap:'var(--space-8)' }}>
+          {Object.entries(labels).map(([key, label]) => (
+            <Lcd key={key} label={label} value={report.counts[key]} size={16}
+              color={key === 'would_reject' ? 'var(--lcd-amber)' : 'var(--lcd-dim)'}/>
+          ))}
+        </div>
+        <p>Retained controller observations from the past seven days. Each candidate still wakes on its first frame.
+          {report.lastStartMs && <> Observer started {new Date(report.lastStartMs).toLocaleString()}.</>}</p>
+        {report.recent.length > 0 && <details>
+          <summary>Recent wake candidates ({report.recent.length})</summary>
+          <div style={{ overflow:'auto', maxHeight:260 }}>
+            <table style={{ width:'100%', textAlign:'left', fontVariantNumeric:'tabular-nums' }}>
+              <thead><tr>{['Time', 'Model', 'Threshold', 'First', 'Second', 'Result'].map(h => <th key={h} scope="col">{h}</th>)}</tr></thead>
+              <tbody>{report.recent.map((e, i) => <tr key={e.candidateTsMs + '-' + i}>
+                <td>{new Date(e.candidateTsMs).toLocaleString()}</td><td>{e.model}</td>
+                <td>{score(e.threshold)}</td><td>{score(e.firstScore)}</td><td>{score(e.secondScore)}</td>
+                <td>{labels[e.verdict]}{e.reason ? ' · ' + e.reason : ''}</td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+        </details>}
+      </>}
+    </Panel>
+  );
+}
+
 function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "var(--font-mono)";
@@ -2396,7 +2448,8 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             const wwLabel = wwModelLabel(cfgEff.owwModel);
             return (
               <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
-                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
+                <WakeObservationPanel key={device.device_id} deviceId={device.device_id}/>
+                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(3) : '—'}`} style={{ flex:1 }}>
                   <TurnObservability
                     turns={turns}
                     deviceId={device.device_id}

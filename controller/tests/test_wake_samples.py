@@ -147,6 +147,30 @@ def test_retention_is_bounded_per_device(fresh_db):
     assert rows[0]["ts"] == samples.KEEP_PER_DEVICE + 2
 
 
+def test_wake_trial_report_counts_all_retained_candidates_and_bounds_details(fresh_db):
+    db.register_new_device("dev2", "127.0.0.2", "v1")
+    def record(verdict, n, device="dev1", source="controller"):
+        event = {"event": "observation", "candidateTsMs": n, "verdict": verdict}
+        db.log_device(device, "info", source, "wake_two_frame " + json.dumps(event))
+
+    record("would_reject", 0)
+    db._conn.execute("UPDATE device_logs SET ts = 0")
+    db._conn.commit()
+    for n in range(101):
+        record("would_accept", n)
+    record("would_reject", 101)
+    record("unavailable", 102)
+    record("would_reject", 103, device="dev2")
+    record("would_reject", 104, source="device")
+    db.log_device("dev1", "info", "controller", 'wake_two_frame {"event":"observation_start"}')
+    db.log_device("dev1", "info", "controller", "wake_two_frame invalid")
+    report = db.wake_two_frame_report("dev1")
+    assert report["counts"] == {"would_accept": 101, "would_reject": 1, "unavailable": 1}
+    assert report["lastStartMs"] >= report["sinceMs"]
+    assert len(report["recent"]) == 100
+    assert report["recent"][0]["candidateTsMs"] == 102
+
+
 def test_retention_unlinks_audio_while_its_row_still_exists(fresh_db, monkeypatch):
     first = samples.filename("dev1")
     assert samples.save("dev1", first, _pcm())

@@ -104,6 +104,7 @@ import em_scenes
 import em_shadow
 import em_health
 import em_wake_samples
+import em_wake_observation
 import em_oww_warmup
 import em_voice_backend as voice_backend
 import em_external_voice
@@ -1537,6 +1538,7 @@ async def _acquire_wake_model(device: "Device", name: str, speex: bool):
     cached = em_state.oww_models.get(device.device_id)
     if cached is not None and cached[0] == name and cached[1] == speex:
         model = cached[2]
+        await em_wake_observation.ready(model)
         await _reset_wake_model(model)
         return model
     model = await loop.run_in_executor(
@@ -3570,6 +3572,8 @@ async def _stream_listen(device: Device):
     model_key = em_oww_models.prediction_key(current_model_name)
 
     log.info(f"[{device.device_id}] OWW: starting (initial threshold={device.oww_threshold:.3f})")
+    if device.oww_on_device != em_shadow.MODE_ON:
+        em_wake_observation.started(device.device_id, model_key, device.oww_threshold)
     await device.mic_start()
 
     buf = bytearray()
@@ -3984,6 +3988,8 @@ async def _stream_listen(device: Device):
                         await _hold_alarms()
                         log.info(f"[{device.device_id}] Wake over a ringing "
                                  f"timer — ring held")
+                    if em_state.devices.get(device.device_id) is not device:
+                        return  # a reconnect can claim this model while predict/alarms yield
                     if not device.voice_lock.locked():
                         # P0-1: do NOT send mic_stop/mic_start_turn.
                         # The stream stays running continuously. Flipping
@@ -3996,14 +4002,15 @@ async def _stream_listen(device: Device):
                         # TTS mic_stop/mic_start remains untouched — that
                         # acoustic-feedback guard is load-bearing.
                         #
-                        # The reset runs in the executor and is NOT awaited
-                        # here: routing to the turn (oww_paused, below) must
-                        # happen on this tick, or frames arriving during the
-                        # reset land in mic_queue and the turn drains them as
-                        # stale — the start of the command. Nothing scores
-                        # with the model until listening resumes, which
-                        # awaits it first.
-                        model_reset = _reset_wake_model(model)
+                        # Keep normal admission and routing immediate. The observation
+                        # borrows the model until its following PCM frame is scored.
+                        if (em_wake_observation.ENABLED and source == "controller"
+                                and not ringing and not em_player.is_playing(device.device_id)):
+                            model_reset = em_wake_observation.after_crossing(
+                                device.device_id, model, model_key, eff_threshold, float(score),
+                                payload, not buf and len(payload) == CHUNK_BYTES, _reset_wake_model)
+                        else:
+                            model_reset = _reset_wake_model(model)
                         warmup.reset()
                         buf.clear()
                         device.cancel_event.clear()
@@ -5784,6 +5791,7 @@ async def _persist_wake_candidate(device, sample: dict) -> None:
 
 async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     device = None
+    wake_tap = em_wake_observation.FrameTap()
     remote = ws.remote_address
     # Initialised here, not in the handler below: the finally block reports
     # it on EVERY exit path, including the ones that never raise
@@ -5869,6 +5877,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     em_ble_proxy.gatt_from_device(device.device_id, raw[1:])
                     continue
                 if raw and raw[0] == em_listen.FRAME_TYPE:
+                    wake_tap.end()
                     # Private-listening session audio. The router holds it
                     # until its wake arrives, and drops it once the session
                     # is closed — never routed by a flag.
@@ -5890,6 +5899,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                 if raw[0] != MIC_FRAME_TYPE:
                     continue
                 if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
+                    wake_tap.end()
                     sentinel = (
                         esphome.VAD_SENTINEL_TIMEOUT
                         if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
@@ -5922,6 +5932,12 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     # does not count time; arrival is the best it offers.
                     _now if device.mic_gated else device.capture_clock.observe(
                         int.from_bytes(raw[1:3], "big"), _now))
+                if em_wake_observation.ENABLED and not device.mic_gated and device.data_ws is ws and not device.muted:
+                    wake_tap.feed(payload, pcm, int.from_bytes(raw[1:3], "big"),
+                                  not device.oww_paused.is_set() and device.wake_word_enabled
+                                  and device.oww_on_device != em_shadow.MODE_ON)
+                else:
+                    wake_tap.end()
                 q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
                 try:
                     q.put_nowait(payload)
@@ -5962,6 +5978,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
         log.error(f"[data] Handler error: {e}")
 
     finally:
+        wake_tap.end()
         if device:
             if device.data_ws is ws:
                 device.data_ws = None

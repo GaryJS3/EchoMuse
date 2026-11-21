@@ -2506,6 +2506,39 @@ def log_device(
         )
 
 
+def wake_two_frame_report(device_id: str) -> dict:
+    """Summarise retained controller observations for this Echo over the last week."""
+    prefix = "wake_two_frame "
+    since_ms = int((time.time() - 7 * 86400) * 1000)
+    rows = _q(
+        """SELECT ts, message FROM device_logs WHERE device_id = ? AND ts >= ?
+           AND source = 'controller' AND message GLOB 'wake_two_frame *'
+           ORDER BY ts DESC, id DESC""",
+        (device_id, since_ms),
+    )
+    counts = {"would_accept": 0, "would_reject": 0, "unavailable": 0}
+    recent = []
+    last_start_ms = None
+    for row in rows:
+        try:
+            event = json.loads(row["message"][len(prefix):])
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") == "observation_start" and last_start_ms is None:
+            last_start_ms = row["ts"]
+        if event.get("event") != "observation":
+            continue
+        verdict = event.get("verdict")
+        if not isinstance(verdict, str) or verdict not in counts:
+            continue
+        counts[verdict] += 1
+        if len(recent) < 100:
+            recent.append(event)
+    return {"sinceMs": since_ms, "lastStartMs": last_start_ms, "counts": counts, "recent": recent}
+
+
 def get_device_logs(
     device_id: str,
     limit: int = 100,
